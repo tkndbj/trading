@@ -5,6 +5,8 @@ from openai import OpenAI
 import statistics
 import json
 from datetime import datetime
+from flask import Flask, jsonify, send_from_directory
+import threading
 
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
@@ -15,6 +17,48 @@ portfolio = {
     'positions': {},    # {'BTC': {'amount': 0.01, 'entry_price': 45000, 'entry_time': '...'}}
     'trade_history': []
 }
+
+# Flask web app for dashboard
+app = Flask(__name__)
+
+@app.route('/')
+def dashboard():
+    """Serve the main dashboard"""
+    return send_from_directory('.', 'index.html')
+
+@app.route('/dashboard.js')
+def dashboard_js():
+    """Serve the JavaScript file"""
+    return send_from_directory('.', 'dashboard.js')
+
+@app.route('/api/status')
+def api_status():
+    """API endpoint for dashboard data"""
+    try:
+        # Get current market data
+        current_market_data = get_market_data()
+        
+        # Calculate portfolio value
+        total_value = calculate_portfolio_value(current_market_data)
+        
+        # Format response data
+        response_data = {
+            'total_value': total_value,
+            'balance': portfolio['balance'],
+            'positions': portfolio['positions'],
+            'trade_history': portfolio['trade_history'],
+            'market_data': current_market_data,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        return jsonify(response_data)
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def run_flask_app():
+    """Run Flask in a separate thread"""
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
 
 def get_market_data():
     """Get comprehensive market data"""
@@ -199,7 +243,6 @@ def display_portfolio_status(market_data):
             print(f"      {coin}: {position['amount']:.6f} @ ${position['entry_price']:,.2f}")
             print(f"           Current: ${current_price:,.2f} | Unrealized P&L: ${unrealized_pnl:+.2f}")
 
-# [Keep all the existing analysis functions - calculate_rsi, analyze_order_book, etc.]
 def calculate_rsi(prices, period=14):
     """RSI calculation"""
     if len(prices) < period + 1:
@@ -285,58 +328,73 @@ Format: BTC:DECISION ETH:DECISION SOL:DECISION BNB:DECISION
         print(f"AI Error: {e}")
         return {coin: "WAIT" for coin in market_data.keys()}
 
-# Initialize data storage
-price_histories = {'BTC': [], 'ETH': [], 'SOL': [], 'BNB': []}
-
-print("🚀 PAPER TRADING BOT STARTED")
-print("💰 Starting Balance: $1,000")
-print("📊 Risk per trade: 2% of portfolio")
-
-while True:
-    try:
-        print("\n" + "="*80)
-        print(f"📊 TRADING SCAN - {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        print("="*80)
-        
-        # Get market data
-        market_data = get_market_data()
-        
-        # Update price histories
-        for coin in market_data:
-            price_histories[coin].append(market_data[coin]['price'])
-            if len(price_histories[coin]) > 50:
-                price_histories[coin] = price_histories[coin][-50:]
-        
-        # Check stop losses and take profits
-        for coin in list(portfolio['positions'].keys()):
-            check_stop_loss_take_profit(coin, market_data[coin]['price'])
-        
-        # Display current prices and analysis
-        for coin, data in market_data.items():
-            rsi = calculate_rsi(price_histories[coin])
-            print(f"💰 {coin}: ${data['price']:,.2f} ({data['change_24h']:+.2f}%) | RSI: {rsi:.1f}")
-        
-        # Get AI decisions and execute trades
-        if all(len(history) >= 10 for history in price_histories.values()):
-            print(f"\n🤖 AI TRADING DECISIONS:")
-            decisions = comprehensive_ai_analysis(market_data, price_histories, {})
-            
-            for coin, decision in decisions.items():
-                analysis_data = {'rsi': calculate_rsi(price_histories[coin])}
-                current_price = market_data[coin]['price']
-                
-                indicator = "🟢" if decision == "BUY" else "🔴" if decision == "SELL" else "🟡"
-                print(f"   {indicator} {coin}: {decision}")
-                
-                # Execute the trade
-                execute_paper_trade(coin, decision, current_price, analysis_data)
-        
-        # Display portfolio status
-        display_portfolio_status(market_data)
-        
-        print("="*80)
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
+def run_trading_bot():
+    """Main trading bot loop"""
+    # Initialize data storage
+    price_histories = {'BTC': [], 'ETH': [], 'SOL': [], 'BNB': []}
     
-    time.sleep(120)  # Trade analysis every 2 minutes
+    print("🚀 PAPER TRADING BOT STARTED")
+    print("💰 Starting Balance: $1,000")
+    print("📊 Risk per trade: 2% of portfolio")
+    print("🌐 Dashboard available at: http://localhost:5000")
+    
+    while True:
+        try:
+            print("\n" + "="*80)
+            print(f"📊 TRADING SCAN - {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            print("="*80)
+            
+            # Get market data
+            market_data = get_market_data()
+            
+            # Update price histories
+            for coin in market_data:
+                price_histories[coin].append(market_data[coin]['price'])
+                if len(price_histories[coin]) > 50:
+                    price_histories[coin] = price_histories[coin][-50:]
+            
+            # Check stop losses and take profits
+            for coin in list(portfolio['positions'].keys()):
+                check_stop_loss_take_profit(coin, market_data[coin]['price'])
+            
+            # Display current prices and analysis
+            for coin, data in market_data.items():
+                rsi = calculate_rsi(price_histories[coin])
+                print(f"💰 {coin}: ${data['price']:,.2f} ({data['change_24h']:+.2f}%) | RSI: {rsi:.1f}")
+            
+            # Get AI decisions and execute trades
+            if all(len(history) >= 10 for history in price_histories.values()):
+                print(f"\n🤖 AI TRADING DECISIONS:")
+                decisions = comprehensive_ai_analysis(market_data, price_histories, {})
+                
+                for coin, decision in decisions.items():
+                    analysis_data = {'rsi': calculate_rsi(price_histories[coin])}
+                    current_price = market_data[coin]['price']
+                    
+                    indicator = "🟢" if decision == "BUY" else "🔴" if decision == "SELL" else "🟡"
+                    print(f"   {indicator} {coin}: {decision}")
+                    
+                    # Execute the trade
+                    execute_paper_trade(coin, decision, current_price, analysis_data)
+            else:
+                data_count = min(len(h) for h in price_histories.values())
+                print(f"\n📈 Building analysis database... ({data_count}/10 data points)")
+            
+            # Display portfolio status
+            display_portfolio_status(market_data)
+            
+            print("="*80)
+            
+        except Exception as e:
+            print(f"❌ Error: {e}")
+        
+        time.sleep(120)  # Trade analysis every 2 minutes
+
+# Start both Flask web server and trading bot
+if __name__ == "__main__":
+    # Start Flask in a separate thread
+    flask_thread = threading.Thread(target=run_flask_app, daemon=True)
+    flask_thread.start()
+    
+    # Start the trading bot in main thread
+    run_trading_bot()

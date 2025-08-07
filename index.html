@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Trading Bot Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"
+      rel="stylesheet"
+    />
+  </head>
+  <body class="bg-gray-900 text-white min-h-screen">
+    <!-- Header -->
+    <nav class="bg-gray-800 shadow-lg border-b border-gray-700">
+      <div class="container mx-auto px-6 py-4">
+        <div class="flex items-center justify-between">
+          <h1 class="text-2xl font-bold text-blue-400">
+            <i class="fas fa-robot mr-2"></i>AI Trading Bot
+          </h1>
+          <div class="flex items-center space-x-4">
+            <div class="text-green-400">
+              <i class="fas fa-circle text-xs mr-1"></i>
+              <span class="text-sm">LIVE</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </nav>
+
+    <div class="container mx-auto px-6 py-8">
+      <!-- Portfolio Summary Cards -->
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+        <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-gray-400 text-sm">Portfolio Value</p>
+              <p class="text-2xl font-bold text-white" id="total-value">
+                $1,000.00
+              </p>
+            </div>
+            <i class="fas fa-wallet text-blue-400 text-2xl"></i>
+          </div>
+        </div>
+
+        <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-gray-400 text-sm">Total P&L</p>
+              <p class="text-2xl font-bold" id="total-pnl">$0.00</p>
+            </div>
+            <i class="fas fa-chart-line text-green-400 text-2xl"></i>
+          </div>
+        </div>
+
+        <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-gray-400 text-sm">Active Positions</p>
+              <p class="text-2xl font-bold text-white" id="active-positions">
+                0
+              </p>
+            </div>
+            <i class="fas fa-coins text-yellow-400 text-2xl"></i>
+          </div>
+        </div>
+
+        <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-gray-400 text-sm">Total Trades</p>
+              <p class="text-2xl font-bold text-white" id="total-trades">0</p>
+            </div>
+            <i class="fas fa-exchange-alt text-purple-400 text-2xl"></i>
+          </div>
+        </div>
+      </div>
+
+      <!-- Main Content Grid -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <!-- Live Market Data -->
+        <div class="lg:col-span-2">
+          <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+            <h2 class="text-xl font-bold mb-6 text-blue-400">
+              <i class="fas fa-chart-candlestick mr-2"></i>Live Market Data
+            </h2>
+            <div class="space-y-4" id="market-data">
+              <!-- Market data will be populated here -->
+            </div>
+          </div>
+        </div>
+
+        <!-- Portfolio Allocation -->
+        <div>
+          <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+            <h2 class="text-xl font-bold mb-6 text-blue-400">
+              <i class="fas fa-pie-chart mr-2"></i>Portfolio
+            </h2>
+            <canvas id="portfolio-chart" width="300" height="300"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- Active Positions -->
+      <div class="mt-8">
+        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+          <h2 class="text-xl font-bold mb-6 text-blue-400">
+            <i class="fas fa-chart-area mr-2"></i>Active Positions
+          </h2>
+          <div class="overflow-x-auto">
+            <table class="w-full" id="positions-table">
+              <thead>
+                <tr class="border-b border-gray-700">
+                  <th class="text-left py-3 px-4 text-gray-400">Asset</th>
+                  <th class="text-left py-3 px-4 text-gray-400">Amount</th>
+                  <th class="text-left py-3 px-4 text-gray-400">Entry Price</th>
+                  <th class="text-left py-3 px-4 text-gray-400">
+                    Current Price
+                  </th>
+                  <th class="text-left py-3 px-4 text-gray-400">P&L</th>
+                  <th class="text-left py-3 px-4 text-gray-400">Duration</th>
+                  <th class="text-left py-3 px-4 text-gray-400">Stop Loss</th>
+                  <th class="text-left py-3 px-4 text-gray-400">Take Profit</th>
+                </tr>
+              </thead>
+              <tbody id="positions-body">
+                <tr>
+                  <td colspan="8" class="text-center py-8 text-gray-400">
+                    <i class="fas fa-inbox text-4xl mb-4 block"></i>
+                    No active positions
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Trade History -->
+      <div class="mt-8">
+        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+          <h2 class="text-xl font-bold mb-6 text-blue-400">
+            <i class="fas fa-history mr-2"></i>Recent Trades
+          </h2>
+          <div class="overflow-x-auto">
+            <table class="w-full" id="trades-table">
+              <thead>
+                <tr class="border-b border-gray-700">
+                  <th class="text-left py-3 px-4 text-gray-400">Time</th>
+                  <th class="text-left py-3 px-4 text-gray-400">Asset</th>
+                  <th class="text-left py-3 px-4 text-gray-400">Action</th>
+                  <th class="text-left py-3 px-4 text-gray-400">Price</th>
+                  <th class="text-left py-3 px-4 text-gray-400">Amount</th>
+                  <th class="text-left py-3 px-4 text-gray-400">Value</th>
+                  <th class="text-left py-3 px-4 text-gray-400">P&L</th>
+                </tr>
+              </thead>
+              <tbody id="trades-body">
+                <tr>
+                  <td colspan="7" class="text-center py-8 text-gray-400">
+                    <i class="fas fa-chart-line text-4xl mb-4 block"></i>
+                    No trades yet - AI is analyzing market conditions
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="dashboard.js"></script>
+  </body>
+</html>
