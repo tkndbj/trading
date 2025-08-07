@@ -3,9 +3,18 @@ import time
 import os
 from openai import OpenAI
 import statistics
+import json
+from datetime import datetime
 
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
+
+# Paper Trading Portfolio
+portfolio = {
+    'balance': 1000.0,  # Starting with $1000 virtual money
+    'positions': {},    # {'BTC': {'amount': 0.01, 'entry_price': 45000, 'entry_time': '...'}}
+    'trade_history': []
+}
 
 def get_market_data():
     """Get comprehensive market data"""
@@ -39,6 +48,158 @@ def get_market_data():
     
     return market_data
 
+def execute_paper_trade(coin, decision, current_price, analysis_data):
+    """Execute paper trading based on AI decision"""
+    global portfolio
+    
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    if decision == "BUY" and coin not in portfolio['positions']:
+        # Calculate position size (risk 2% of portfolio per trade)
+        risk_amount = portfolio['balance'] * 0.02
+        position_size = risk_amount / current_price
+        
+        if portfolio['balance'] >= risk_amount:
+            # Open position
+            portfolio['positions'][coin] = {
+                'amount': position_size,
+                'entry_price': current_price,
+                'entry_time': timestamp,
+                'stop_loss': current_price * 0.95,  # 5% stop loss
+                'take_profit': current_price * 1.10  # 10% take profit
+            }
+            
+            portfolio['balance'] -= risk_amount
+            
+            trade_record = {
+                'time': timestamp,
+                'coin': coin,
+                'action': 'BUY',
+                'price': current_price,
+                'amount': position_size,
+                'value': risk_amount,
+                'reason': f"AI Signal + RSI: {analysis_data.get('rsi', 'N/A')}"
+            }
+            portfolio['trade_history'].append(trade_record)
+            
+            print(f"   📈 BOUGHT {coin}: ${risk_amount:.2f} at ${current_price:,.2f}")
+            print(f"      Amount: {position_size:.6f} {coin}")
+            print(f"      Stop Loss: ${portfolio['positions'][coin]['stop_loss']:,.2f}")
+            print(f"      Take Profit: ${portfolio['positions'][coin]['take_profit']:,.2f}")
+    
+    elif decision == "SELL" and coin in portfolio['positions']:
+        # Close position
+        position = portfolio['positions'][coin]
+        current_value = position['amount'] * current_price
+        profit_loss = current_value - (position['amount'] * position['entry_price'])
+        
+        portfolio['balance'] += current_value
+        
+        trade_record = {
+            'time': timestamp,
+            'coin': coin,
+            'action': 'SELL',
+            'price': current_price,
+            'amount': position['amount'],
+            'value': current_value,
+            'profit_loss': profit_loss,
+            'reason': f"AI Signal + RSI: {analysis_data.get('rsi', 'N/A')}"
+        }
+        portfolio['trade_history'].append(trade_record)
+        
+        del portfolio['positions'][coin]
+        
+        profit_emoji = "💰" if profit_loss > 0 else "📉"
+        print(f"   {profit_emoji} SOLD {coin}: ${current_value:.2f} at ${current_price:,.2f}")
+        print(f"      P&L: ${profit_loss:+.2f} ({(profit_loss/current_value)*100:+.2f}%)")
+
+def check_stop_loss_take_profit(coin, current_price):
+    """Check if stop loss or take profit should trigger"""
+    global portfolio
+    
+    if coin not in portfolio['positions']:
+        return
+    
+    position = portfolio['positions'][coin]
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Check stop loss
+    if current_price <= position['stop_loss']:
+        current_value = position['amount'] * current_price
+        profit_loss = current_value - (position['amount'] * position['entry_price'])
+        
+        portfolio['balance'] += current_value
+        
+        trade_record = {
+            'time': timestamp,
+            'coin': coin,
+            'action': 'STOP_LOSS',
+            'price': current_price,
+            'amount': position['amount'],
+            'value': current_value,
+            'profit_loss': profit_loss,
+            'reason': f"Stop Loss triggered at ${current_price:,.2f}"
+        }
+        portfolio['trade_history'].append(trade_record)
+        
+        del portfolio['positions'][coin]
+        print(f"   🛑 STOP LOSS {coin}: ${current_value:.2f} (P&L: ${profit_loss:+.2f})")
+    
+    # Check take profit
+    elif current_price >= position['take_profit']:
+        current_value = position['amount'] * current_price
+        profit_loss = current_value - (position['amount'] * position['entry_price'])
+        
+        portfolio['balance'] += current_value
+        
+        trade_record = {
+            'time': timestamp,
+            'coin': coin,
+            'action': 'TAKE_PROFIT',
+            'price': current_price,
+            'amount': position['amount'],
+            'value': current_value,
+            'profit_loss': profit_loss,
+            'reason': f"Take Profit triggered at ${current_price:,.2f}"
+        }
+        portfolio['trade_history'].append(trade_record)
+        
+        del portfolio['positions'][coin]
+        print(f"   🎯 TAKE PROFIT {coin}: ${current_value:.2f} (P&L: ${profit_loss:+.2f})")
+
+def calculate_portfolio_value(market_data):
+    """Calculate total portfolio value including open positions"""
+    total_value = portfolio['balance']
+    
+    for coin, position in portfolio['positions'].items():
+        if coin in market_data:
+            current_value = position['amount'] * market_data[coin]['price']
+            total_value += current_value
+    
+    return total_value
+
+def display_portfolio_status(market_data):
+    """Display current portfolio status"""
+    total_value = calculate_portfolio_value(market_data)
+    profit_loss = total_value - 1000  # Starting balance was $1000
+    
+    print(f"\n💼 PORTFOLIO STATUS:")
+    print(f"   Cash Balance: ${portfolio['balance']:.2f}")
+    print(f"   Total Value: ${total_value:.2f}")
+    print(f"   P&L: ${profit_loss:+.2f} ({(profit_loss/1000)*100:+.2f}%)")
+    print(f"   Total Trades: {len(portfolio['trade_history'])}")
+    
+    if portfolio['positions']:
+        print(f"   📊 Open Positions:")
+        for coin, position in portfolio['positions'].items():
+            current_price = market_data[coin]['price']
+            current_value = position['amount'] * current_price
+            unrealized_pnl = current_value - (position['amount'] * position['entry_price'])
+            
+            print(f"      {coin}: {position['amount']:.6f} @ ${position['entry_price']:,.2f}")
+            print(f"           Current: ${current_price:,.2f} | Unrealized P&L: ${unrealized_pnl:+.2f}")
+
+# [Keep all the existing analysis functions - calculate_rsi, analyze_order_book, etc.]
 def calculate_rsi(prices, period=14):
     """RSI calculation"""
     if len(prices) < period + 1:
@@ -64,151 +225,41 @@ def calculate_rsi(prices, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def analyze_order_book(order_book):
-    """Analyze order book for support/resistance and liquidity"""
-    bids = [[float(bid[0]), float(bid[1])] for bid in order_book['bids'][:10]]
-    asks = [[float(ask[0]), float(ask[1])] for ask in order_book['asks'][:10]]
-    
-    # Calculate liquidity metrics
-    bid_liquidity = sum([price * volume for price, volume in bids])
-    ask_liquidity = sum([price * volume for price, volume in asks])
-    total_liquidity = bid_liquidity + ask_liquidity
-    
-    # Liquidity imbalance
-    imbalance = (bid_liquidity - ask_liquidity) / total_liquidity if total_liquidity > 0 else 0
-    
-    # Spread analysis
-    best_bid = bids[0][0] if bids else 0
-    best_ask = asks[0][0] if asks else 0
-    spread = ((best_ask - best_bid) / best_bid * 100) if best_bid > 0 else 0
-    
-    # Find large walls (support/resistance)
-    large_bid_walls = [bid for bid in bids if bid[1] > statistics.mean([b[1] for b in bids]) * 2]
-    large_ask_walls = [ask for ask in asks if ask[1] > statistics.mean([a[1] for a in asks]) * 2]
-    
-    return {
-        'liquidity_imbalance': round(imbalance, 3),
-        'spread_percent': round(spread, 4),
-        'bid_liquidity': round(bid_liquidity, 2),
-        'ask_liquidity': round(ask_liquidity, 2),
-        'large_bid_walls': len(large_bid_walls),
-        'large_ask_walls': len(large_ask_walls),
-        'best_bid': best_bid,
-        'best_ask': best_ask
-    }
-
-def analyze_volume_profile(trades, current_price):
-    """Analyze volume distribution around price levels"""
-    if not trades:
-        return {'volume_weighted_price': current_price, 'volume_trend': 'neutral'}
-    
-    # Calculate volume weighted average price (VWAP)
-    total_volume = 0
-    volume_price_sum = 0
-    
-    buy_volume = 0
-    sell_volume = 0
-    
-    for trade in trades[-50:]:  # Last 50 trades
-        price = float(trade['price'])
-        volume = float(trade['qty'])
-        is_buyer = trade.get('isBuyerMaker', False)
-        
-        total_volume += volume
-        volume_price_sum += price * volume
-        
-        if is_buyer:
-            sell_volume += volume  # Buyer maker means sell order filled
-        else:
-            buy_volume += volume   # Seller maker means buy order filled
-    
-    vwap = volume_price_sum / total_volume if total_volume > 0 else current_price
-    
-    # Volume trend analysis
-    volume_ratio = buy_volume / (buy_volume + sell_volume) if (buy_volume + sell_volume) > 0 else 0.5
-    
-    if volume_ratio > 0.6:
-        volume_trend = 'bullish'
-    elif volume_ratio < 0.4:
-        volume_trend = 'bearish'
-    else:
-        volume_trend = 'neutral'
-    
-    return {
-        'vwap': round(vwap, 2),
-        'volume_trend': volume_trend,
-        'buy_volume_ratio': round(volume_ratio, 3)
-    }
-
-def detect_supply_demand_zones(prices, volumes=None):
-    """Identify key supply and demand zones"""
-    if len(prices) < 10:
-        return {'support_levels': [], 'resistance_levels': []}
-    
-    recent_prices = prices[-20:]  # Last 20 data points
-    current_price = recent_prices[-1]
-    
-    # Find local support (demand zones)
-    support_levels = []
-    resistance_levels = []
-    
-    for i in range(2, len(recent_prices) - 2):
-        # Support: price is lower than surrounding prices
-        if (recent_prices[i] < recent_prices[i-1] and 
-            recent_prices[i] < recent_prices[i-2] and
-            recent_prices[i] < recent_prices[i+1] and 
-            recent_prices[i] < recent_prices[i+2]):
-            support_levels.append(recent_prices[i])
-        
-        # Resistance: price is higher than surrounding prices
-        if (recent_prices[i] > recent_prices[i-1] and 
-            recent_prices[i] > recent_prices[i-2] and
-            recent_prices[i] > recent_prices[i+1] and 
-            recent_prices[i] > recent_prices[i+2]):
-            resistance_levels.append(recent_prices[i])
-    
-    # Filter to most relevant levels (within 5% of current price)
-    relevant_support = [s for s in support_levels if abs(s - current_price) / current_price < 0.05]
-    relevant_resistance = [r for r in resistance_levels if abs(r - current_price) / current_price < 0.05]
-    
-    return {
-        'support_levels': relevant_support[-3:],  # Keep 3 most recent
-        'resistance_levels': relevant_resistance[-3:]
-    }
-
 def comprehensive_ai_analysis(market_data, price_histories, technical_data):
-    """Advanced AI market analysis"""
+    """AI analysis with trading context"""
     if not client:
-        return {coin: "WAIT (No API key)" for coin in market_data.keys()}
+        return {coin: "WAIT" for coin in market_data.keys()}
     
-    # Build comprehensive analysis prompt
-    analysis_text = "COMPREHENSIVE CRYPTO MARKET ANALYSIS\n\n"
+    # Include portfolio context in AI decision
+    portfolio_context = f"Current Portfolio Value: ${calculate_portfolio_value(market_data):.2f}\n"
+    portfolio_context += f"Open Positions: {list(portfolio['positions'].keys())}\n"
+    
+    analysis_text = f"{portfolio_context}\nMARKET ANALYSIS:\n\n"
     
     for coin, data in market_data.items():
-        tech = technical_data[coin]
         rsi = calculate_rsi(price_histories.get(coin, []))
         
-        analysis_text += f"--- {coin} ANALYSIS ---\n"
-        analysis_text += f"Price: ${data['price']:,.2f} ({data['change_24h']:+.2f}%)\n"
-        analysis_text += f"24h Range: ${data['low_24h']:,.2f} - ${data['high_24h']:,.2f}\n"
-        analysis_text += f"RSI: {rsi:.1f}\n"
-        analysis_text += f"VWAP: ${tech['volume_profile']['vwap']:,.2f}\n"
-        analysis_text += f"Volume Trend: {tech['volume_profile']['volume_trend']}\n"
-        analysis_text += f"Buy/Sell Ratio: {tech['volume_profile']['buy_volume_ratio']:.2f}\n"
-        analysis_text += f"Liquidity Imbalance: {tech['order_book']['liquidity_imbalance']:+.3f}\n"
-        analysis_text += f"Spread: {tech['order_book']['spread_percent']:.3f}%\n"
-        analysis_text += f"Support Levels: {tech['supply_demand']['support_levels']}\n"
-        analysis_text += f"Resistance Levels: {tech['supply_demand']['resistance_levels']}\n\n"
+        analysis_text += f"{coin}: ${data['price']:,.2f} ({data['change_24h']:+.2f}%)\n"
+        analysis_text += f"RSI: {rsi:.1f} | Volume: {data['volume']:,.0f}\n"
+        
+        if coin in portfolio['positions']:
+            pos = portfolio['positions'][coin]
+            unrealized = (data['price'] - pos['entry_price']) * pos['amount']
+            analysis_text += f"OPEN POSITION: Entry ${pos['entry_price']:,.2f} | P&L: ${unrealized:+.2f}\n"
+        
+        analysis_text += "\n"
     
     prompt = f"""{analysis_text}
 
-TRADING DECISION FRAMEWORK:
-- BUY Signals: RSI < 30, bullish volume trend, price near support, positive liquidity imbalance
-- SELL Signals: RSI > 70, bearish volume trend, price near resistance, negative liquidity imbalance  
-- WAIT Signals: Conflicting signals, high spread, unclear trend, RSI 30-70 with neutral volume
+TRADING RULES:
+- Only BUY if strong bullish signals and NO existing position
+- Only SELL if bearish signals and HAVE existing position  
+- Use WAIT for unclear signals or portfolio management
+- Consider RSI: BUY if <30, SELL if >70, WAIT if 30-70
+- Maximum 2 open positions at once
 
-For each coin, analyze ALL factors and provide ONE decision: BUY, SELL, or WAIT
-Format response as: BTC:DECISION ETH:DECISION SOL:DECISION BNB:DECISION
+For each coin, provide: BUY, SELL, or WAIT
+Format: BTC:DECISION ETH:DECISION SOL:DECISION BNB:DECISION
 """
 
     try:
@@ -236,64 +287,56 @@ Format response as: BTC:DECISION ETH:DECISION SOL:DECISION BNB:DECISION
 
 # Initialize data storage
 price_histories = {'BTC': [], 'ETH': [], 'SOL': [], 'BNB': []}
-volume_histories = {'BTC': [], 'ETH': [], 'SOL': [], 'BNB': []}
 
-print("🚀 Advanced Crypto Trading Bot Started")
-print("Analyzing: Order Books, Volume Profiles, RSI, Supply/Demand Zones")
+print("🚀 PAPER TRADING BOT STARTED")
+print("💰 Starting Balance: $1,000")
+print("📊 Risk per trade: 2% of portfolio")
 
 while True:
     try:
         print("\n" + "="*80)
-        print(f"📊 MARKET SCAN - {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"📊 TRADING SCAN - {time.strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*80)
         
-        # Get comprehensive market data
+        # Get market data
         market_data = get_market_data()
         
         # Update price histories
         for coin in market_data:
             price_histories[coin].append(market_data[coin]['price'])
-            volume_histories[coin].append(market_data[coin]['volume'])
-            
-            # Keep last 50 data points
             if len(price_histories[coin]) > 50:
                 price_histories[coin] = price_histories[coin][-50:]
-                volume_histories[coin] = volume_histories[coin][-50:]
         
-        # Perform technical analysis for each coin
-        technical_data = {}
+        # Check stop losses and take profits
+        for coin in list(portfolio['positions'].keys()):
+            check_stop_loss_take_profit(coin, market_data[coin]['price'])
+        
+        # Display current prices and analysis
         for coin, data in market_data.items():
-            order_book_analysis = analyze_order_book(data['order_book'])
-            volume_analysis = analyze_volume_profile(data['recent_trades'], data['price'])
-            supply_demand = detect_supply_demand_zones(price_histories[coin], volume_histories[coin])
-            
-            technical_data[coin] = {
-                'order_book': order_book_analysis,
-                'volume_profile': volume_analysis,
-                'supply_demand': supply_demand
-            }
-            
-            # Display analysis
             rsi = calculate_rsi(price_histories[coin])
-            print(f"\n💰 {coin}: ${data['price']:,.2f} ({data['change_24h']:+.2f}%)")
-            print(f"   RSI: {rsi:.1f} | VWAP: ${volume_analysis['vwap']:,.2f} | Volume: {volume_analysis['volume_trend']}")
-            print(f"   Spread: {order_book_analysis['spread_percent']:.3f}% | Liquidity: {order_book_analysis['liquidity_imbalance']:+.3f}")
-            print(f"   Support: {len(supply_demand['support_levels'])} levels | Resistance: {len(supply_demand['resistance_levels'])} levels")
+            print(f"💰 {coin}: ${data['price']:,.2f} ({data['change_24h']:+.2f}%) | RSI: {rsi:.1f}")
         
-        # Get AI analysis (after sufficient data)
+        # Get AI decisions and execute trades
         if all(len(history) >= 10 for history in price_histories.values()):
-            print(f"\n🤖 AI ANALYSIS:")
-            decisions = comprehensive_ai_analysis(market_data, price_histories, technical_data)
+            print(f"\n🤖 AI TRADING DECISIONS:")
+            decisions = comprehensive_ai_analysis(market_data, price_histories, {})
             
             for coin, decision in decisions.items():
+                analysis_data = {'rsi': calculate_rsi(price_histories[coin])}
+                current_price = market_data[coin]['price']
+                
                 indicator = "🟢" if decision == "BUY" else "🔴" if decision == "SELL" else "🟡"
                 print(f"   {indicator} {coin}: {decision}")
-        else:
-            print(f"\n📈 Building analysis database... ({min(len(h) for h in price_histories.values())}/10 data points)")
+                
+                # Execute the trade
+                execute_paper_trade(coin, decision, current_price, analysis_data)
+        
+        # Display portfolio status
+        display_portfolio_status(market_data)
         
         print("="*80)
         
     except Exception as e:
         print(f"❌ Error: {e}")
     
-    time.sleep(90)  # Analyze every 90 seconds
+    time.sleep(120)  # Trade analysis every 2 minutes
