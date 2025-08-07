@@ -45,9 +45,12 @@ async function fetchData() {
 
     updateSummaryCards(data);
     updateMarketData(data.market_data);
-    updatePositions(data.positions, data.market_data);
-    updateTradeHistory(data.trade_history);
+    updateLeveragePositions(data.positions, data.market_data);
+    updateLeverageTradeHistory(data.trade_history);
     updatePortfolioChart(data);
+
+    // Show learning metrics
+    updateLearningMetrics(data.learning_metrics);
   } catch (error) {
     console.error("Error fetching data:", error);
     // Show connection status
@@ -109,7 +112,7 @@ function updateMarketData(marketData) {
   });
 }
 
-function updatePositions(positions, marketData) {
+function updateLeveragePositions(positions, marketData) {
   const tbody = document.getElementById("positions-body");
 
   if (Object.keys(positions).length === 0) {
@@ -126,27 +129,51 @@ function updatePositions(positions, marketData) {
 
   tbody.innerHTML = "";
 
-  Object.entries(positions).forEach(([coin, position]) => {
+  Object.entries(positions).forEach(([positionId, position]) => {
+    const coin = position.coin;
     const currentPrice = marketData[coin].price;
-    const unrealizedPnl =
-      (currentPrice - position.entry_price) * position.amount;
-    const pnlPercent =
-      (unrealizedPnl / (position.entry_price * position.amount)) * 100;
+    const entryPrice = position.entry_price;
+    const direction = position.direction;
+    const leverage = position.leverage;
+
+    // Calculate P&L for leverage position
+    let pnlPercent;
+    if (direction === "LONG") {
+      pnlPercent = (currentPrice - entryPrice) / entryPrice;
+    } else {
+      // SHORT
+      pnlPercent = (entryPrice - currentPrice) / entryPrice;
+    }
+
+    const pnlAmount = pnlPercent * position.notional_value;
     const duration = calculateDuration(position.entry_time);
 
-    const pnlColor = unrealizedPnl >= 0 ? "text-green-400" : "text-red-400";
+    const pnlColor = pnlAmount >= 0 ? "text-green-400" : "text-red-400";
+    const directionColor =
+      direction === "LONG" ? "text-green-400" : "text-red-400";
+    const directionIcon =
+      direction === "LONG" ? "fa-arrow-up" : "fa-arrow-down";
 
     tbody.innerHTML += `
             <tr class="border-b border-gray-700">
-                <td class="py-3 px-4 font-semibold">${coin}</td>
-                <td class="py-3 px-4">${position.amount.toFixed(6)}</td>
-                <td class="py-3 px-4">$${position.entry_price.toLocaleString()}</td>
+                <td class="py-3 px-4 font-semibold">
+                    <span class="${directionColor}">
+                        <i class="fas ${directionIcon} mr-1"></i>${direction}
+                    </span>
+                    ${coin}
+                    <br><span class="text-xs text-gray-400">${leverage}x Leverage</span>
+                </td>
+                <td class="py-3 px-4">
+                    $${position.position_size.toFixed(2)}
+                    <br><span class="text-xs text-gray-400">Notional: $${position.notional_value.toLocaleString()}</span>
+                </td>
+                <td class="py-3 px-4">$${entryPrice.toLocaleString()}</td>
                 <td class="py-3 px-4">$${currentPrice.toLocaleString()}</td>
                 <td class="py-3 px-4 ${pnlColor} font-semibold">
-                    $${unrealizedPnl >= 0 ? "+" : ""}${unrealizedPnl.toFixed(2)}
-                    <br><span class="text-sm">(${
-                      pnlPercent >= 0 ? "+" : ""
-                    }${pnlPercent.toFixed(1)}%)</span>
+                    $${pnlAmount >= 0 ? "+" : ""}${pnlAmount.toFixed(2)}
+                    <br><span class="text-sm">(${pnlPercent >= 0 ? "+" : ""}${(
+      pnlPercent * 100
+    ).toFixed(1)}%)</span>
                 </td>
                 <td class="py-3 px-4">${duration}</td>
                 <td class="py-3 px-4">$${position.stop_loss.toLocaleString()}</td>
@@ -156,7 +183,7 @@ function updatePositions(positions, marketData) {
   });
 }
 
-function updateTradeHistory(tradeHistory) {
+function updateLeverageTradeHistory(tradeHistory) {
   const tbody = document.getElementById("trades-body");
 
   if (tradeHistory.length === 0) {
@@ -178,36 +205,123 @@ function updateTradeHistory(tradeHistory) {
     .slice(-10)
     .reverse()
     .forEach((trade) => {
-      const actionColor =
-        trade.action === "BUY" ? "text-green-400" : "text-red-400";
-      const actionIcon =
-        trade.action === "BUY" ? "fa-arrow-up" : "fa-arrow-down";
+      const isOpen = trade.action.includes("OPEN");
+      const isClose =
+        trade.action.includes("CLOSE") ||
+        trade.action.includes("STOP_LOSS") ||
+        trade.action.includes("TAKE_PROFIT");
+
+      let actionColor = "text-gray-400";
+      let actionIcon = "fa-exchange-alt";
+      let actionText = trade.action;
+
+      if (trade.action.includes("LONG")) {
+        actionColor = "text-green-400";
+        actionIcon = "fa-arrow-up";
+      } else if (trade.action.includes("SHORT")) {
+        actionColor = "text-red-400";
+        actionIcon = "fa-arrow-down";
+      }
 
       let pnlCell = "-";
-      if (trade.profit_loss !== undefined) {
-        const pnlColor =
-          trade.profit_loss >= 0 ? "text-green-400" : "text-red-400";
+      if (trade.pnl !== undefined && trade.pnl !== null) {
+        const pnlColor = trade.pnl >= 0 ? "text-green-400" : "text-red-400";
         pnlCell = `<span class="${pnlColor}">$${
-          trade.profit_loss >= 0 ? "+" : ""
-        }${trade.profit_loss.toFixed(2)}</span>`;
+          trade.pnl >= 0 ? "+" : ""
+        }${trade.pnl.toFixed(2)}</span>`;
+        if (trade.pnl_percent) {
+          pnlCell += `<br><span class="text-xs ${pnlColor}">(${
+            trade.pnl_percent >= 0 ? "+" : ""
+          }${trade.pnl_percent.toFixed(1)}%)</span>`;
+        }
       }
+
+      const leverageInfo = trade.leverage ? `${trade.leverage}x` : "";
+      const positionSize = trade.position_size
+        ? `$${trade.position_size.toFixed(2)}`
+        : "-";
 
       tbody.innerHTML += `
             <tr class="border-b border-gray-700">
-                <td class="py-3 px-4">${new Date(
+                <td class="py-3 px-4 text-sm">${new Date(
                   trade.time
                 ).toLocaleTimeString()}</td>
-                <td class="py-3 px-4 font-semibold">${trade.coin}</td>
+                <td class="py-3 px-4 font-semibold">
+                    ${trade.coin}
+                    ${
+                      leverageInfo
+                        ? `<br><span class="text-xs text-gray-400">${leverageInfo}</span>`
+                        : ""
+                    }
+                </td>
                 <td class="py-3 px-4 ${actionColor}">
-                    <i class="fas ${actionIcon} mr-1"></i>${trade.action}
+                    <i class="fas ${actionIcon} mr-1"></i>${actionText}
                 </td>
                 <td class="py-3 px-4">$${trade.price.toLocaleString()}</td>
-                <td class="py-3 px-4">${trade.amount.toFixed(6)}</td>
-                <td class="py-3 px-4">$${trade.value.toFixed(2)}</td>
+                <td class="py-3 px-4">${positionSize}</td>
+                <td class="py-3 px-4">
+                    ${
+                      trade.notional_value
+                        ? `$${trade.notional_value.toLocaleString()}`
+                        : positionSize
+                    }
+                </td>
                 <td class="py-3 px-4">${pnlCell}</td>
             </tr>
         `;
     });
+}
+
+function updateLearningMetrics(metrics) {
+  // Add learning metrics display if not exists
+  let metricsContainer = document.getElementById("learning-metrics");
+  if (!metricsContainer) {
+    // Create learning metrics section
+    const mainContainer = document.querySelector(".container");
+    const metricsHTML = `
+      <div class="mt-8" id="learning-metrics-section">
+        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+          <h2 class="text-xl font-bold mb-6 text-blue-400">
+            <i class="fas fa-brain mr-2"></i>AI Learning Metrics
+          </h2>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="learning-metrics">
+            <!-- Metrics will be populated here -->
+          </div>
+        </div>
+      </div>
+    `;
+    mainContainer.insertAdjacentHTML("beforeend", metricsHTML);
+    metricsContainer = document.getElementById("learning-metrics");
+  }
+
+  if (metrics) {
+    metricsContainer.innerHTML = `
+      <div class="text-center">
+        <p class="text-2xl font-bold text-green-400">${
+          metrics.win_rate?.toFixed(1) || 0
+        }%</p>
+        <p class="text-gray-400 text-sm">Win Rate</p>
+      </div>
+      <div class="text-center">
+        <p class="text-2xl font-bold text-yellow-400">${
+          metrics.best_leverage || 10
+        }x</p>
+        <p class="text-gray-400 text-sm">Best Leverage</p>
+      </div>
+      <div class="text-center">
+        <p class="text-2xl font-bold text-blue-400">${
+          metrics.total_trades || 0
+        }</p>
+        <p class="text-gray-400 text-sm">Total Trades</p>
+      </div>
+      <div class="text-center">
+        <p class="text-2xl font-bold text-purple-400">$${
+          metrics.avg_profit?.toFixed(2) || "0.00"
+        }</p>
+        <p class="text-gray-400 text-sm">Avg Profit</p>
+      </div>
+    `;
+  }
 }
 
 function updatePortfolioChart(data) {
@@ -215,10 +329,24 @@ function updatePortfolioChart(data) {
   const values = [data.balance];
   const colors = ["#60a5fa"];
 
-  Object.entries(data.positions).forEach(([coin, position]) => {
-    const currentValue = position.amount * data.market_data[coin].price;
-    labels.push(coin);
-    values.push(currentValue);
+  Object.entries(data.positions).forEach(([positionId, position]) => {
+    const coin = position.coin;
+    const currentPrice = data.market_data[coin].price;
+    const entryPrice = position.entry_price;
+    const direction = position.direction;
+
+    // Calculate current position value
+    let pnlPercent;
+    if (direction === "LONG") {
+      pnlPercent = (currentPrice - entryPrice) / entryPrice;
+    } else {
+      pnlPercent = (entryPrice - currentPrice) / entryPrice;
+    }
+
+    const currentValue =
+      position.position_size + pnlPercent * position.notional_value;
+    labels.push(`${direction} ${coin}`);
+    values.push(Math.max(0, currentValue)); // Don't show negative values in chart
     colors.push(getRandomColor());
   });
 
