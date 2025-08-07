@@ -9,7 +9,6 @@ from flask import Flask, jsonify, send_from_directory
 import threading
 import math
 import sqlite3
-import numpy as np
 from collections import deque
 
 api_key = os.getenv("OPENAI_API_KEY")
@@ -81,6 +80,8 @@ def init_database():
             duration_target TEXT,
             confidence INTEGER,
             reasoning TEXT,
+            market_regime TEXT,
+            atr_at_entry REAL,
             last_checked DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -121,6 +122,18 @@ def init_database():
         )
     ''')
     
+    # Market regime tracking
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS market_regimes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            coin TEXT NOT NULL,
+            regime TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            indicators TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
     # Cost tracking table with daily aggregation
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS cost_tracking (
@@ -145,7 +158,7 @@ def init_database():
     
     conn.commit()
     conn.close()
-    print("📁 Optimized SQLite database initialized")
+    print("📁 Enhanced SQLite database initialized")
 
 def track_cost(service, cost, units):
     """Track service costs with daily aggregation"""
@@ -245,8 +258,8 @@ def save_active_position(position_id, position):
         INSERT OR REPLACE INTO active_positions 
         (position_id, coin, direction, entry_price, entry_time, position_size,
          leverage, notional_value, stop_loss, take_profit, duration_target,
-         confidence, reasoning)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         confidence, reasoning, market_regime, atr_at_entry)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         position_id,
         position['coin'],
@@ -260,7 +273,9 @@ def save_active_position(position_id, position):
         position['take_profit'],
         position.get('duration_target', 'SWING'),
         position.get('confidence', 5),
-        position.get('reasoning', '')
+        position.get('reasoning', ''),
+        position.get('market_regime', 'UNKNOWN'),
+        position.get('atr', 0)
     ))
     
     conn.commit()
@@ -289,7 +304,9 @@ def load_active_positions():
             'take_profit': pos[9],
             'duration_target': pos[10],
             'confidence': pos[11],
-            'reasoning': pos[12]
+            'reasoning': pos[12],
+            'market_regime': pos[13] if len(pos) > 13 else 'UNKNOWN',
+            'atr': pos[14] if len(pos) > 14 else 0
         }
     
     conn.close()
@@ -379,7 +396,8 @@ def get_batch_market_data():
                         'change_24h': float(ticker['priceChangePercent']),
                         'volume': float(ticker['volume']),
                         'high_24h': float(ticker['highPrice']),
-                        'low_24h': float(ticker['lowPrice'])
+                        'low_24h': float(ticker['lowPrice']),
+                        'quote_volume': float(ticker['quoteVolume'])
                     }
         
         return market_data
@@ -408,9 +426,11 @@ def get_multi_timeframe_data(symbol):
     """Get multi-timeframe data for a single symbol"""
     base_url = "https://api.binance.com/api/v3/klines"
     intervals = {
-        '5m': ('5m', 24),    # 2 hours of 5-minute candles
-        '1h': ('1h', 24),    # 24 hours of hourly candles
-        '4h': ('4h', 28)     # ~5 days of 4-hour candles
+        '5m': ('5m', 48),    # 4 hours of 5-minute candles
+        '15m': ('15m', 48),  # 12 hours of 15-minute candles
+        '1h': ('1h', 48),    # 48 hours of hourly candles
+        '4h': ('4h', 42),    # 7 days of 4-hour candles
+        '1d': ('1d', 30)     # 30 days of daily candles
     }
     
     multi_tf_data = {}
@@ -430,41 +450,469 @@ def get_multi_timeframe_data(symbol):
                     'closes': [float(c[4]) for c in candles],
                     'volumes': [float(c[5]) for c in candles],
                     'highs': [float(c[2]) for c in candles],
-                    'lows': [float(c[3]) for c in candles]
+                    'lows': [float(c[3]) for c in candles],
+                    'opens': [float(c[1]) for c in candles]
                 }
         except:
             pass
     
     return multi_tf_data
 
+def calculate_atr(highs, lows, closes, period=14):
+    """Calculate Average True Range for volatility-based stops"""
+    if len(highs) < period + 1 or len(lows) < period + 1 or len(closes) < period + 1:
+        return 0
+    
+    tr_values = []
+    for i in range(1, len(highs)):
+        high_low = highs[i] - lows[i]
+        high_close = abs(highs[i] - closes[i-1])
+        low_close = abs(lows[i] - closes[i-1])
+        tr = max(high_low, high_close, low_close)
+        tr_values.append(tr)
+    
+    if len(tr_values) < period:
+        return 0
+    
+    atr = sum(tr_values[-period:]) / period
+    return atr
+
+def calculate_vwap(prices, volumes):
+    """Calculate Volume Weighted Average Price"""
+    if not prices or not volumes or len(prices) != len(volumes):
+        return 0
+    
+    total_volume = sum(volumes)
+    if total_volume == 0:
+        return sum(prices) / len(prices)
+    
+    vwap = sum(p * v for p, v in zip(prices, volumes)) / total_volume
+    return vwap
+
+def identify_support_resistance(candles, lookback=20):
+    """Identify key support and resistance levels"""
+    if len(candles) < lookback:
+        return {'support': [], 'resistance': []}
+    
+    highs = [float(c[2]) for c in candles[-lookback:]]
+    lows = [float(c[3]) for c in candles[-lookback:]]
+    closes = [float(c[4]) for c in candles[-lookback:]]
+    
+    # Find local peaks and troughs
+    resistance_levels = []
+    support_levels = []
+    
+    for i in range(2, len(highs) - 2):
+        # Resistance: local high
+        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
+           highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+            resistance_levels.append(highs[i])
+        
+        # Support: local low
+        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
+           lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+            support_levels.append(lows[i])
+    
+    # Cluster nearby levels
+    def cluster_levels(levels, threshold=0.01):
+        if not levels:
+            return []
+        
+        clustered = []
+        levels.sort()
+        current_cluster = [levels[0]]
+        
+        for level in levels[1:]:
+            if (level - current_cluster[-1]) / current_cluster[-1] < threshold:
+                current_cluster.append(level)
+            else:
+                clustered.append(sum(current_cluster) / len(current_cluster))
+                current_cluster = [level]
+        
+        if current_cluster:
+            clustered.append(sum(current_cluster) / len(current_cluster))
+        
+        return clustered
+    
+    return {
+        'support': cluster_levels(support_levels),
+        'resistance': cluster_levels(resistance_levels)
+    }
+
+def calculate_volume_profile(prices, volumes, bins=10):
+    """Calculate volume profile to identify high-liquidity zones"""
+    if not prices or not volumes:
+        return {'poc': 0, 'val_high': 0, 'val_low': 0}
+    
+    min_price = min(prices)
+    max_price = max(prices)
+    
+    if min_price == max_price:
+        return {'poc': min_price, 'val_high': min_price, 'val_low': min_price}
+    
+    # Create price bins
+    bin_size = (max_price - min_price) / bins
+    volume_by_price = {}
+    
+    for price, volume in zip(prices, volumes):
+        bin_index = min(int((price - min_price) / bin_size), bins - 1)
+        bin_price = min_price + (bin_index + 0.5) * bin_size
+        
+        if bin_price not in volume_by_price:
+            volume_by_price[bin_price] = 0
+        volume_by_price[bin_price] += volume
+    
+    if not volume_by_price:
+        return {'poc': 0, 'val_high': 0, 'val_low': 0}
+    
+    # Find Point of Control (highest volume price)
+    poc = max(volume_by_price.keys(), key=lambda x: volume_by_price[x])
+    
+    # Find Value Area (70% of volume)
+    total_volume = sum(volume_by_price.values())
+    target_volume = total_volume * 0.7
+    
+    sorted_prices = sorted(volume_by_price.keys(), key=lambda x: volume_by_price[x], reverse=True)
+    accumulated_volume = 0
+    value_area_prices = []
+    
+    for price in sorted_prices:
+        accumulated_volume += volume_by_price[price]
+        value_area_prices.append(price)
+        if accumulated_volume >= target_volume:
+            break
+    
+    val_high = max(value_area_prices) if value_area_prices else poc
+    val_low = min(value_area_prices) if value_area_prices else poc
+    
+    return {
+        'poc': poc,
+        'val_high': val_high,
+        'val_low': val_low,
+        'volume_nodes': volume_by_price
+    }
+
+def detect_market_regime(multi_tf_data, current_price):
+    """Detect if market is trending, ranging, or volatile"""
+    if not multi_tf_data or '1h' not in multi_tf_data:
+        return {'regime': 'UNKNOWN', 'confidence': 0, 'indicators': {}}
+    
+    hourly_data = multi_tf_data['1h']
+    if 'closes' not in hourly_data or len(hourly_data['closes']) < 20:
+        return {'regime': 'UNKNOWN', 'confidence': 0, 'indicators': {}}
+    
+    closes = hourly_data['closes']
+    highs = hourly_data['highs']
+    lows = hourly_data['lows']
+    volumes = hourly_data['volumes']
+    
+    indicators = {}
+    
+    # 1. ADX for trend strength (simplified version)
+    def calculate_adx_simplified(highs, lows, closes, period=14):
+        if len(highs) < period + 1:
+            return 0
+        
+        plus_dm = []
+        minus_dm = []
+        tr_values = []
+        
+        for i in range(1, len(highs)):
+            high_diff = highs[i] - highs[i-1]
+            low_diff = lows[i-1] - lows[i]
+            
+            plus_dm.append(max(high_diff, 0) if high_diff > low_diff else 0)
+            minus_dm.append(max(low_diff, 0) if low_diff > high_diff else 0)
+            
+            tr = max(highs[i] - lows[i], 
+                    abs(highs[i] - closes[i-1]), 
+                    abs(lows[i] - closes[i-1]))
+            tr_values.append(tr)
+        
+        if not tr_values:
+            return 0
+        
+        avg_tr = sum(tr_values[-period:]) / period
+        avg_plus_dm = sum(plus_dm[-period:]) / period
+        avg_minus_dm = sum(minus_dm[-period:]) / period
+        
+        if avg_tr == 0:
+            return 0
+        
+        plus_di = (avg_plus_dm / avg_tr) * 100
+        minus_di = (avg_minus_dm / avg_tr) * 100
+        
+        if plus_di + minus_di == 0:
+            return 0
+        
+        dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+        return dx
+    
+    adx = calculate_adx_simplified(highs, lows, closes)
+    indicators['adx'] = adx
+    
+    # 2. Bollinger Bands width for volatility
+    sma_20 = sum(closes[-20:]) / 20
+    std_dev = math.sqrt(sum((c - sma_20) ** 2 for c in closes[-20:]) / 20)
+    bb_width = (std_dev * 2) / sma_20 * 100  # As percentage
+    indicators['bb_width'] = bb_width
+    
+    # 3. Price position relative to moving averages
+    sma_50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else sma_20
+    ema_9 = calculate_ema(closes, 9)
+    
+    price_above_sma = current_price > sma_20
+    price_above_sma50 = current_price > sma_50
+    indicators['price_above_sma'] = price_above_sma
+    
+    # 4. Higher highs/lower lows for trend detection
+    recent_highs = highs[-10:]
+    recent_lows = lows[-10:]
+    
+    higher_highs = sum(1 for i in range(1, len(recent_highs)) if recent_highs[i] > recent_highs[i-1]) > 6
+    lower_lows = sum(1 for i in range(1, len(recent_lows)) if recent_lows[i] < recent_lows[i-1]) > 6
+    
+    # 5. Volume trend
+    avg_volume_recent = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else 0
+    avg_volume_older = sum(volumes[-20:-10]) / 10 if len(volumes) >= 20 else avg_volume_recent
+    volume_increasing = avg_volume_recent > avg_volume_older * 1.2
+    indicators['volume_trend'] = 'increasing' if volume_increasing else 'stable'
+    
+    # Determine regime
+    confidence = 0
+    regime = 'UNKNOWN'
+    
+    if adx > 25:  # Strong trend
+        if higher_highs or (price_above_sma and price_above_sma50):
+            regime = 'TRENDING_UP'
+            confidence = min(adx / 40 * 100, 90)
+        elif lower_lows or (not price_above_sma and not price_above_sma50):
+            regime = 'TRENDING_DOWN'
+            confidence = min(adx / 40 * 100, 90)
+    elif adx < 20 and bb_width < 3:  # Ranging market
+        regime = 'RANGING'
+        confidence = 70
+    elif bb_width > 5:  # High volatility
+        regime = 'VOLATILE'
+        confidence = min(bb_width * 10, 80)
+    else:
+        regime = 'TRANSITIONAL'
+        confidence = 50
+    
+    return {
+        'regime': regime,
+        'confidence': confidence,
+        'indicators': indicators
+    }
+
+def calculate_ema(prices, period):
+    """Calculate Exponential Moving Average"""
+    if len(prices) < period:
+        return 0
+    
+    multiplier = 2 / (period + 1)
+    ema = sum(prices[:period]) / period  # Initial SMA
+    
+    for price in prices[period:]:
+        ema = (price - ema) * multiplier + ema
+    
+    return ema
+
+def calculate_macd(prices):
+    """Calculate MACD indicator"""
+    if len(prices) < 26:
+        return {'macd': 0, 'signal': 0, 'histogram': 0}
+    
+    ema_12 = calculate_ema(prices, 12)
+    ema_26 = calculate_ema(prices, 26)
+    macd_line = ema_12 - ema_26
+    
+    # For signal line, we need MACD history
+    macd_values = []
+    for i in range(26, len(prices)):
+        subset = prices[:i+1]
+        ema_12_temp = calculate_ema(subset, 12)
+        ema_26_temp = calculate_ema(subset, 26)
+        macd_values.append(ema_12_temp - ema_26_temp)
+    
+    signal_line = calculate_ema(macd_values, 9) if len(macd_values) >= 9 else 0
+    histogram = macd_line - signal_line
+    
+    return {
+        'macd': macd_line,
+        'signal': signal_line,
+        'histogram': histogram
+    }
+
+def calculate_dynamic_stops(current_price, atr, support_levels, resistance_levels, direction, market_regime):
+    """Calculate dynamic stop loss and take profit based on market conditions"""
+    
+    # Base multipliers adjusted by market regime
+    sl_multiplier = 1.5  # Base stop loss ATR multiplier
+    tp_multiplier = 2.5  # Base take profit ATR multiplier
+    
+    if market_regime == 'VOLATILE':
+        sl_multiplier = 2.0  # Wider stop in volatile markets
+        tp_multiplier = 3.5  # Larger targets
+    elif market_regime == 'RANGING':
+        sl_multiplier = 1.0  # Tighter stop in ranging markets
+        tp_multiplier = 1.5  # Smaller targets
+    elif market_regime in ['TRENDING_UP', 'TRENDING_DOWN']:
+        sl_multiplier = 1.8  # Give trend room to breathe
+        tp_multiplier = 4.0  # Larger targets in trends
+    
+    # Calculate ATR-based stops
+    atr_stop_distance = atr * sl_multiplier
+    atr_target_distance = atr * tp_multiplier
+    
+    if direction == 'LONG':
+        # Initial ATR-based levels
+        stop_loss = current_price - atr_stop_distance
+        take_profit = current_price + atr_target_distance
+        
+        # Adjust stop loss to nearest support
+        if support_levels:
+            nearest_support = max([s for s in support_levels if s < current_price], default=None)
+            if nearest_support and nearest_support > stop_loss:
+                stop_loss = nearest_support * 0.998  # Just below support
+        
+        # Adjust take profit to nearest resistance
+        if resistance_levels:
+            nearest_resistance = min([r for r in resistance_levels if r > current_price], default=None)
+            if nearest_resistance and nearest_resistance < take_profit:
+                # Only adjust if resistance is at least 1.5x ATR away
+                if (nearest_resistance - current_price) > atr * 1.5:
+                    take_profit = nearest_resistance * 0.998  # Just below resistance
+    
+    else:  # SHORT
+        # Initial ATR-based levels
+        stop_loss = current_price + atr_stop_distance
+        take_profit = current_price - atr_target_distance
+        
+        # Adjust stop loss to nearest resistance
+        if resistance_levels:
+            nearest_resistance = min([r for r in resistance_levels if r > current_price], default=None)
+            if nearest_resistance and nearest_resistance < stop_loss:
+                stop_loss = nearest_resistance * 1.002  # Just above resistance
+        
+        # Adjust take profit to nearest support
+        if support_levels:
+            nearest_support = max([s for s in support_levels if s < current_price], default=None)
+            if nearest_support and nearest_support > take_profit:
+                # Only adjust if support is at least 1.5x ATR away
+                if (current_price - nearest_support) > atr * 1.5:
+                    take_profit = nearest_support * 1.002  # Just above support
+    
+    # Calculate percentages for validation
+    sl_percentage = abs(stop_loss - current_price) / current_price
+    tp_percentage = abs(take_profit - current_price) / current_price
+    
+    # Ensure minimum and maximum boundaries
+    min_sl = 0.01  # 1% minimum
+    max_sl = 0.05  # 5% maximum
+    min_tp = 0.015  # 1.5% minimum
+    max_tp = 0.10  # 10% maximum
+    
+    if sl_percentage < min_sl:
+        if direction == 'LONG':
+            stop_loss = current_price * (1 - min_sl)
+        else:
+            stop_loss = current_price * (1 + min_sl)
+    elif sl_percentage > max_sl:
+        if direction == 'LONG':
+            stop_loss = current_price * (1 - max_sl)
+        else:
+            stop_loss = current_price * (1 + max_sl)
+    
+    if tp_percentage < min_tp:
+        if direction == 'LONG':
+            take_profit = current_price * (1 + min_tp)
+        else:
+            take_profit = current_price * (1 - min_tp)
+    elif tp_percentage > max_tp:
+        if direction == 'LONG':
+            take_profit = current_price * (1 + max_tp)
+        else:
+            take_profit = current_price * (1 - max_tp)
+    
+    return {
+        'stop_loss': stop_loss,
+        'take_profit': take_profit,
+        'sl_percentage': abs(stop_loss - current_price) / current_price * 100,
+        'tp_percentage': abs(take_profit - current_price) / current_price * 100,
+        'risk_reward': tp_percentage / sl_percentage if sl_percentage > 0 else 0
+    }
+
 def analyze_timeframe_alignment(multi_tf_data):
-    """Analyze alignment across timeframes"""
+    """Enhanced timeframe alignment analysis"""
     if not multi_tf_data:
-        return {'aligned': False, 'score': 0, 'direction': 'neutral', 'signals': {}}
+        return {'aligned': False, 'score': 0, 'direction': 'neutral', 'signals': {}, 'strength': 0}
     
     alignment_score = 0
     signals = {}
+    strength_scores = []
     
     for tf, data in multi_tf_data.items():
-        if 'closes' in data and len(data['closes']) > 10:
+        if 'closes' in data and len(data['closes']) > 20:
             closes = data['closes']
             
-            # Trend detection
+            # Multiple indicators per timeframe
             sma_short = sum(closes[-5:]) / 5
-            sma_long = sum(closes[-10:]) / 10
+            sma_mid = sum(closes[-10:]) / 10
+            sma_long = sum(closes[-20:]) / 20
             
-            if sma_short > sma_long * 1.005:  # 0.5% buffer
+            # RSI
+            rsi = calculate_rsi(closes)
+            
+            # MACD
+            macd_data = calculate_macd(closes)
+            
+            # Scoring for this timeframe
+            tf_score = 0
+            
+            # Trend alignment
+            if sma_short > sma_mid > sma_long:
+                tf_score += 2
+                signals[tf] = 'strong_bullish'
+            elif sma_short > sma_mid and sma_mid > sma_long * 0.995:
+                tf_score += 1
                 signals[tf] = 'bullish'
-                alignment_score += 1
-            elif sma_short < sma_long * 0.995:
+            elif sma_short < sma_mid < sma_long:
+                tf_score -= 2
+                signals[tf] = 'strong_bearish'
+            elif sma_short < sma_mid and sma_mid < sma_long * 1.005:
+                tf_score -= 1
                 signals[tf] = 'bearish'
-                alignment_score -= 1
             else:
                 signals[tf] = 'neutral'
+            
+            # RSI confirmation
+            if rsi > 60 and tf_score > 0:
+                tf_score += 0.5
+            elif rsi < 40 and tf_score < 0:
+                tf_score -= 0.5
+            
+            # MACD confirmation
+            if macd_data['histogram'] > 0 and tf_score > 0:
+                tf_score += 0.5
+            elif macd_data['histogram'] < 0 and tf_score < 0:
+                tf_score -= 0.5
+            
+            alignment_score += tf_score
+            strength_scores.append(abs(tf_score))
     
-    # Determine overall direction
-    if alignment_score >= 2:
+    # Calculate overall strength
+    avg_strength = sum(strength_scores) / len(strength_scores) if strength_scores else 0
+    
+    # Determine overall direction with higher thresholds
+    if alignment_score >= 4:
+        direction = 'strong_bullish'
+        aligned = True
+    elif alignment_score >= 2:
         direction = 'bullish'
+        aligned = True
+    elif alignment_score <= -4:
+        direction = 'strong_bearish'
         aligned = True
     elif alignment_score <= -2:
         direction = 'bearish'
@@ -477,7 +925,8 @@ def analyze_timeframe_alignment(multi_tf_data):
         'aligned': aligned,
         'direction': direction,
         'score': alignment_score,
-        'signals': signals
+        'signals': signals,
+        'strength': avg_strength
     }
 
 def calculate_rsi(prices, period=14):
@@ -539,8 +988,8 @@ def quick_position_check(position_id, position, current_price):
     
     return should_close
 
-def smart_position_analysis(position_id, position, market_data, sentiment):
-    """Full position analysis with AI (used less frequently)"""
+def smart_position_analysis(position_id, position, market_data, sentiment, multi_tf_data):
+    """Enhanced position analysis with trailing stops and dynamic adjustments"""
     coin = position['coin']
     current_price = market_data[coin]['price']
     entry_price = position['entry_price']
@@ -573,11 +1022,45 @@ def smart_position_analysis(position_id, position, market_data, sentiment):
             should_close = True
             close_reason = "Take Profit Hit"
     
+    # Trailing stop implementation
+    if not should_close and pnl_percent > 0.02:  # If in profit > 2%
+        if multi_tf_data and '1h' in multi_tf_data:
+            hourly_data = multi_tf_data['1h']
+            if 'highs' in hourly_data and 'lows' in hourly_data and 'closes' in hourly_data:
+                atr = calculate_atr(hourly_data['highs'], hourly_data['lows'], hourly_data['closes'])
+                
+                if atr > 0:
+                    trailing_distance = atr * 1.5
+                    
+                    if direction == 'LONG':
+                        new_stop = current_price - trailing_distance
+                        if new_stop > position['stop_loss'] and new_stop > entry_price:
+                            # Update stop loss in position
+                            position['stop_loss'] = new_stop
+                            print(f"   📍 Trailing stop updated for {coin}: ${new_stop:.2f}")
+                    else:  # SHORT
+                        new_stop = current_price + trailing_distance
+                        if new_stop < position['stop_loss'] and new_stop < entry_price:
+                            position['stop_loss'] = new_stop
+                            print(f"   📍 Trailing stop updated for {coin}: ${new_stop:.2f}")
+    
     # Smart exit analysis only if not hitting SL/TP and significant sentiment shift
     if not should_close and abs(sentiment) > 50:
-        # Only use AI if market has shifted significantly
-        if (direction == 'LONG' and sentiment < -50) or \
-           (direction == 'SHORT' and sentiment > 50):
+        # Detect market regime change
+        if multi_tf_data:
+            market_regime = detect_market_regime(multi_tf_data, current_price)
+            
+            # Exit if regime has changed dramatically
+            if position.get('market_regime') and market_regime['regime'] != position.get('market_regime'):
+                if (direction == 'LONG' and market_regime['regime'] == 'TRENDING_DOWN') or \
+                   (direction == 'SHORT' and market_regime['regime'] == 'TRENDING_UP'):
+                    if pnl_percent > -0.01:  # Only if loss less than 1%
+                        should_close = True
+                        close_reason = f"Regime Change: {market_regime['regime']}"
+        
+        # AI-based exit for extreme sentiment shifts
+        if not should_close and ((direction == 'LONG' and sentiment < -60) or \
+                                 (direction == 'SHORT' and sentiment > 60)):
             
             if client and pnl_percent > -0.015:  # Only if loss less than 1.5%
                 try:
@@ -612,7 +1095,7 @@ Should we exit? Reply: CLOSE or HOLD (one word)
     return pnl_amount
 
 def ai_trade_decision(coin, market_data, multi_tf_data, learning_insights):
-    """Optimized AI trading decision"""
+    """Enhanced AI trading decision with advanced indicators"""
     if not client:
         return None
     
@@ -623,26 +1106,75 @@ def ai_trade_decision(coin, market_data, multi_tf_data, learning_insights):
     if not tf_alignment['aligned']:
         return {'direction': 'SKIP', 'reason': 'Timeframes not aligned'}
     
-    # Simplified prompt for cost efficiency
+    # Calculate advanced indicators
+    hourly_data = multi_tf_data.get('1h', {})
+    daily_data = multi_tf_data.get('1d', {})
+    
+    # ATR for volatility
+    atr = 0
+    if 'highs' in hourly_data and 'lows' in hourly_data and 'closes' in hourly_data:
+        atr = calculate_atr(hourly_data['highs'], hourly_data['lows'], hourly_data['closes'])
+    
+    # Support/Resistance levels
+    sr_levels = identify_support_resistance(hourly_data.get('candles', []))
+    
+    # Volume Profile
+    volume_profile = calculate_volume_profile(
+        hourly_data.get('closes', []), 
+        hourly_data.get('volumes', [])
+    )
+    
+    # Market Regime
+    market_regime = detect_market_regime(multi_tf_data, current_price)
+    
+    # VWAP
+    vwap = calculate_vwap(hourly_data.get('closes', []), hourly_data.get('volumes', []))
+    
+    # Dynamic stops calculation
+    dynamic_stops = calculate_dynamic_stops(
+        current_price, 
+        atr, 
+        sr_levels.get('support', []), 
+        sr_levels.get('resistance', []),
+        'LONG' if tf_alignment['direction'] in ['bullish', 'strong_bullish'] else 'SHORT',
+        market_regime['regime']
+    )
+    
+    # Enhanced prompt with all indicators
     analysis_prompt = f"""
-{coin} TRADING ANALYSIS
+{coin} ADVANCED TRADING ANALYSIS
 
 Price: ${current_price:.2f}
 24h: {market_data[coin]['change_24h']:+.1f}%
 Volume: {market_data[coin]['volume']/1000000:.1f}M
 
-Timeframes: {tf_alignment['direction']} (score: {tf_alignment['score']})
-Win Rate: {learning_insights.get('win_rate', 0):.0f}%
-Best Leverage: {learning_insights.get('best_leverage', 10)}x
+MARKET STRUCTURE:
+- Regime: {market_regime['regime']} (confidence: {market_regime['confidence']:.0f}%)
+- Timeframe Alignment: {tf_alignment['direction']} (score: {tf_alignment['score']:.1f})
+- ATR: ${atr:.2f}
+- VWAP: ${vwap:.2f}
 
-Decision needed:
+LEVELS:
+- POC (High Volume): ${volume_profile['poc']:.2f}
+- Value Area: ${volume_profile['val_low']:.2f} - ${volume_profile['val_high']:.2f}
+- Support: {', '.join([f'${s:.2f}' for s in sr_levels['support'][:3]])}
+- Resistance: {', '.join([f'${r:.2f}' for r in sr_levels['resistance'][:3]])}
+
+DYNAMIC RISK:
+- Suggested SL: {dynamic_stops['sl_percentage']:.1f}%
+- Suggested TP: {dynamic_stops['tp_percentage']:.1f}%
+- Risk/Reward: {dynamic_stops['risk_reward']:.1f}
+
+LEARNING:
+- Win Rate: {learning_insights.get('win_rate', 0):.0f}%
+- Best Leverage: {learning_insights.get('best_leverage', 10)}x
+
+Based on market structure, volume profile, and regime, provide:
 DECISION: [LONG/SHORT/SKIP]
-LEVERAGE: [10-20]
-SIZE: [5-10]%
-SL: [1.5-3]%
-TP: [2-5]%
+LEVERAGE: [5-20]
+SIZE: [3-10]%
 CONFIDENCE: [1-10]
-REASON: [one line]
+REASON: [one line about key factors]
 """
 
     try:
@@ -650,11 +1182,11 @@ REASON: [one line]
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": analysis_prompt}],
             max_tokens=150,
-            temperature=0.5
+            temperature=0.4
         )
         
         # Track cost
-        track_cost('openai', 0.00005, '200')
+        track_cost('openai', 0.00008, '300')
         
         # Parse response
         ai_response = response.choices[0].message.content.strip()
@@ -669,20 +1201,22 @@ REASON: [one line]
                 if 'DECISION' in key:
                     trade_params['direction'] = value.upper()
                 elif 'LEVERAGE' in key:
-                    trade_params['leverage'] = min(20, max(10, int(''.join(filter(str.isdigit, value)))))
+                    trade_params['leverage'] = min(20, max(5, int(''.join(filter(str.isdigit, value)))))
                 elif 'SIZE' in key:
                     size = float(''.join(filter(lambda x: x.isdigit() or x == '.', value)))
-                    trade_params['position_size'] = min(0.10, max(0.05, size / 100))
-                elif 'SL' in key:
-                    sl = float(''.join(filter(lambda x: x.isdigit() or x == '.', value)))
-                    trade_params['stop_loss'] = min(0.03, max(0.015, sl / 100))
-                elif 'TP' in key:
-                    tp = float(''.join(filter(lambda x: x.isdigit() or x == '.', value)))
-                    trade_params['take_profit'] = min(0.05, max(0.02, tp / 100))
+                    trade_params['position_size'] = min(0.10, max(0.03, size / 100))
                 elif 'CONFIDENCE' in key:
                     trade_params['confidence'] = min(10, max(1, int(''.join(filter(str.isdigit, value)))))
                 elif 'REASON' in key:
-                    trade_params['reasoning'] = value[:100]  # Limit reason length
+                    trade_params['reasoning'] = value[:150]
+        
+        # Use dynamic stops
+        trade_params['stop_loss'] = dynamic_stops['stop_loss']
+        trade_params['take_profit'] = dynamic_stops['take_profit']
+        trade_params['sl_percentage'] = dynamic_stops['sl_percentage']
+        trade_params['tp_percentage'] = dynamic_stops['tp_percentage']
+        trade_params['market_regime'] = market_regime['regime']
+        trade_params['atr'] = atr
         
         # Default values if parsing fails
         if 'direction' not in trade_params:
@@ -691,14 +1225,10 @@ REASON: [one line]
             trade_params['leverage'] = 10
         if 'position_size' not in trade_params:
             trade_params['position_size'] = 0.05
-        if 'stop_loss' not in trade_params:
-            trade_params['stop_loss'] = 0.02
-        if 'take_profit' not in trade_params:
-            trade_params['take_profit'] = 0.03
         if 'confidence' not in trade_params:
             trade_params['confidence'] = 5
         if 'reasoning' not in trade_params:
-            trade_params['reasoning'] = 'Standard trade'
+            trade_params['reasoning'] = f"{market_regime['regime']} market, {tf_alignment['direction']} alignment"
         
         trade_params['duration'] = 'SWING'  # Default
         
@@ -709,7 +1239,7 @@ REASON: [one line]
         return None
 
 def execute_trade(coin, trade_params, current_price):
-    """Execute trade with position"""
+    """Execute trade with enhanced position management"""
     global portfolio
     
     if trade_params['direction'] == 'SKIP':
@@ -722,13 +1252,9 @@ def execute_trade(coin, trade_params, current_price):
     leverage = trade_params['leverage']
     notional_value = position_value * leverage
     
-    # Calculate SL/TP prices
-    if trade_params['direction'] == 'LONG':
-        stop_loss_price = current_price * (1 - trade_params['stop_loss'])
-        take_profit_price = current_price * (1 + trade_params['take_profit'])
-    else:
-        stop_loss_price = current_price * (1 + trade_params['stop_loss'])
-        take_profit_price = current_price * (1 - trade_params['take_profit'])
+    # Use the dynamic stops calculated earlier
+    stop_loss_price = trade_params['stop_loss']
+    take_profit_price = trade_params['take_profit']
     
     position_id = f"{coin}_{timestamp.replace(' ', '_').replace(':', '-')}"
     
@@ -744,7 +1270,9 @@ def execute_trade(coin, trade_params, current_price):
         'take_profit': take_profit_price,
         'duration_target': trade_params.get('duration', 'SWING'),
         'confidence': trade_params['confidence'],
-        'reasoning': trade_params['reasoning']
+        'reasoning': trade_params['reasoning'],
+        'market_regime': trade_params.get('market_regime', 'UNKNOWN'),
+        'atr': trade_params.get('atr', 0)
     }
     
     portfolio['positions'][position_id] = position
@@ -769,8 +1297,12 @@ def execute_trade(coin, trade_params, current_price):
     })
     
     emoji = "📈" if trade_params['direction'] == 'LONG' else "📉"
+    risk_reward = trade_params.get('tp_percentage', 0) / trade_params.get('sl_percentage', 1) if trade_params.get('sl_percentage', 0) > 0 else 0
+    
     print(f"\n   {emoji} {trade_params['direction']} {coin}: ${position_value:.2f} @ {leverage}x")
-    print(f"      Confidence: {trade_params['confidence']}/10 | SL: ${stop_loss_price:.2f} | TP: ${take_profit_price:.2f}")
+    print(f"      Market: {trade_params.get('market_regime', 'UNKNOWN')} | Confidence: {trade_params['confidence']}/10")
+    print(f"      SL: ${stop_loss_price:.2f} (-{trade_params.get('sl_percentage', 0):.1f}%) | TP: ${take_profit_price:.2f} (+{trade_params.get('tp_percentage', 0):.1f}%)")
+    print(f"      Risk/Reward: 1:{risk_reward:.1f} | Reason: {trade_params['reasoning'][:50]}...")
 
 def close_position(position_id, position, current_price, reason, pnl_amount):
     """Close position"""
@@ -886,6 +1418,17 @@ def get_learning_insights():
     avg_loss = cursor.fetchone()[0]
     insights['avg_loss'] = avg_loss if avg_loss else 0
     
+    # Market regime performance
+    cursor.execute('''
+        SELECT market_conditions, COUNT(*) as count, AVG(pnl_percent) as avg_pnl
+        FROM trades
+        WHERE market_conditions IS NOT NULL AND pnl IS NOT NULL
+        GROUP BY market_conditions
+    ''')
+    
+    regime_performance = cursor.fetchall()
+    insights['regime_performance'] = {row[0]: {'count': row[1], 'avg_pnl': row[2]} for row in regime_performance}
+    
     conn.close()
     return insights
 
@@ -909,15 +1452,22 @@ def calculate_portfolio_value(market_data):
     
     return max(0, total)
 
-def run_optimized_bot():
-    """Main bot loop with TRUE hybrid monitoring approach"""
+def run_enhanced_bot():
+    """Main bot loop with enhanced features"""
     # Initialize
     init_database()
     portfolio['positions'] = load_active_positions()
     
-    print("🚀 OPTIMIZED SMART TRADING BOT - HYBRID MODE")
-    print("⚡ Quick checks: Every 15 seconds (positions only)")
+    print("🚀 ENHANCED SMART TRADING BOT - ADVANCED MODE")
+    print("⚡ Quick checks: Every 15 seconds (positions + trailing stops)")
     print("🧠 Full analysis: Every 2 minutes (complete scan)")
+    print("📊 Advanced Features:")
+    print("   • Volume Profile & Liquidity Analysis")
+    print("   • Support/Resistance Detection")
+    print("   • Market Regime Detection (Trending/Ranging/Volatile)")
+    print("   • Dynamic Stop Loss & Take Profit")
+    print("   • Trailing Stops for Winners")
+    print("   • Multi-Indicator Confluence")
     print("💰 Max positions: 4 concurrent")
     print("🎯 Min confidence: 6/10")
     print("📊 Coins: BTC, ETH, SOL, BNB, ADA, DOGE, AVAX, TAO, LINK, DOT, UNI, FET")
@@ -986,38 +1536,59 @@ def run_optimized_bot():
                 for coin in target_coins:
                     if coin in market_data:
                         price_histories[coin].append(market_data[coin]['price'])
-                        if len(price_histories[coin]) > 50:
-                            price_histories[coin] = price_histories[coin][-50:]
+                        if len(price_histories[coin]) > 100:  # Keep more history for better analysis
+                            price_histories[coin] = price_histories[coin][-100:]
                 
-                # Display market overview with technical indicators
-                print("\n📊 Market Overview:")
-                market_summary = []
+                # Display enhanced market overview
+                print("\n📊 Market Overview with Advanced Metrics:")
                 for coin in target_coins[:6]:  # Show first 6 coins
                     if coin in market_data:
                         data = market_data[coin]
+                        
+                        # Get multi-timeframe data for this coin
+                        symbol = f"{coin}USDT"
+                        coin_tf_data = get_multi_timeframe_data(symbol)
+                        
+                        # Calculate indicators
                         rsi = calculate_rsi(price_histories[coin]) if len(price_histories[coin]) > 14 else 50
                         
-                        # Determine trend
-                        trend = "→"
-                        if data['change_24h'] > 1:
-                            trend = "↑"
-                        elif data['change_24h'] < -1:
-                            trend = "↓"
+                        # Detect market regime
+                        regime_data = detect_market_regime(coin_tf_data, data['price'])
+                        regime = regime_data['regime']
                         
-                        print(f"   {coin}: ${data['price']:.2f} {trend} ({data['change_24h']:+.1f}%) RSI:{rsi:.0f}")
+                        # Trend emoji based on regime
+                        if regime == 'TRENDING_UP':
+                            trend = "🚀"
+                        elif regime == 'TRENDING_DOWN':
+                            trend = "📉"
+                        elif regime == 'RANGING':
+                            trend = "↔️"
+                        elif regime == 'VOLATILE':
+                            trend = "⚡"
+                        else:
+                            trend = "❓"
+                        
+                        # Volume analysis
+                        vol_ratio = data['volume'] / (sum([m.get('volume', 0) for m in market_data.values()]) / len(market_data))
+                        vol_indicator = "🔥" if vol_ratio > 2 else "📊" if vol_ratio > 1 else "💤"
+                        
+                        print(f"   {coin}: ${data['price']:.2f} {trend} ({data['change_24h']:+.1f}%) RSI:{rsi:.0f} {vol_indicator} [{regime}]")
                 
-                # Advanced position management with sentiment analysis
+                # Advanced position management with enhanced analysis
                 if portfolio['positions']:
-                    print(f"\n📈 Position Management:")
+                    print(f"\n📈 Advanced Position Management:")
                     sentiment_scores = {}
                     
-                    # Calculate sentiment for all coins
+                    # Calculate sentiment for all coins with more factors
                     for coin in market_data:
                         rsi = calculate_rsi(price_histories[coin]) if len(price_histories[coin]) > 14 else 50
                         momentum = market_data[coin]['change_24h']
+                        volume_change = market_data[coin]['volume'] / market_data[coin].get('quote_volume', 1)
                         
                         # Complex sentiment calculation
                         sentiment = 0
+                        
+                        # RSI component
                         if rsi < 30:
                             sentiment += 40  # Oversold
                         elif rsi > 70:
@@ -1025,13 +1596,23 @@ def run_optimized_bot():
                         else:
                             sentiment += (50 - rsi) * 0.5
                         
+                        # Momentum component
                         sentiment += min(max(momentum * 2, -30), 30)
+                        
+                        # Volume component
+                        if volume_change > 1.5:
+                            sentiment += 10 if momentum > 0 else -10
+                        
                         sentiment_scores[coin] = sentiment
                     
                     # Analyze each position with full context
                     for pos_id, position in list(portfolio['positions'].items()):
                         coin = position['coin']
                         if coin in market_data:
+                            # Get fresh multi-timeframe data for position
+                            symbol = f"{coin}USDT"
+                            position_tf_data = get_multi_timeframe_data(symbol)
+                            
                             current_price = market_data[coin]['price']
                             entry_price = position['entry_price']
                             
@@ -1043,20 +1624,33 @@ def run_optimized_bot():
                             
                             pnl_amount = pnl_pct * position['notional_value']
                             
-                            print(f"   • {position['direction']} {coin}: P&L ${pnl_amount:+.2f} ({pnl_pct*100:+.1f}%) | Sentiment: {sentiment_scores.get(coin, 0):.0f}")
+                            # Calculate distance to stops
+                            sl_distance = abs(current_price - position['stop_loss']) / current_price * 100
+                            tp_distance = abs(position['take_profit'] - current_price) / current_price * 100
                             
-                            # Smart position analysis with AI
-                            smart_position_analysis(pos_id, position, market_data, sentiment_scores.get(coin, 0))
+                            print(f"   • {position['direction']} {coin}: P&L ${pnl_amount:+.2f} ({pnl_pct*100:+.1f}%)")
+                            print(f"     SL: -{sl_distance:.1f}% | TP: +{tp_distance:.1f}% | Sentiment: {sentiment_scores.get(coin, 0):.0f}")
+                            
+                            # Smart position analysis with enhanced features
+                            smart_position_analysis(pos_id, position, market_data, sentiment_scores.get(coin, 0), position_tf_data)
                 
-                # Look for new trading opportunities
+                # Look for new trading opportunities with enhanced analysis
                 if len(portfolio['positions']) < MAX_CONCURRENT_POSITIONS:
                     if all(len(history) >= 20 for history in price_histories.values()):
                         learning_insights = get_learning_insights()
                         
-                        print(f"\n🤖 AI Opportunity Scan:")
+                        print(f"\n🤖 AI Advanced Opportunity Scan:")
                         print(f"   Historical Win Rate: {learning_insights['win_rate']:.1f}%")
                         print(f"   Optimal Leverage: {learning_insights.get('best_leverage', 10)}x")
-                        print(f"   Scanning {len(target_coins)} coins...")
+                        
+                        # Show regime performance if available
+                        if 'regime_performance' in learning_insights and learning_insights['regime_performance']:
+                            print(f"   Best Market Regime: ", end="")
+                            best_regime = max(learning_insights['regime_performance'].items(), 
+                                            key=lambda x: x[1].get('avg_pnl', 0))
+                            print(f"{best_regime[0]} ({best_regime[1]['avg_pnl']:.1f}% avg)")
+                        
+                        print(f"   Scanning {len(target_coins)} coins with advanced indicators...")
                         
                         opportunities_found = 0
                         opportunities_analyzed = 0
@@ -1080,27 +1674,42 @@ def run_optimized_bot():
                             # Store timeframe data for pattern recognition
                             timeframe_data[coin] = multi_tf_data
                             
+                            # Check market regime first
+                            regime_data = detect_market_regime(multi_tf_data, market_data[coin]['price'])
+                            
+                            # Skip if market is too volatile or transitional
+                            if regime_data['regime'] == 'TRANSITIONAL' and regime_data['confidence'] < 60:
+                                continue
+                            
                             # AI trade decision with all context
                             trade_params = ai_trade_decision(coin, market_data, multi_tf_data, learning_insights)
                             
                             if trade_params and trade_params['direction'] != 'SKIP':
                                 if trade_params['confidence'] >= MIN_CONFIDENCE_THRESHOLD:
-                                    print(f"   ✅ Opportunity: {trade_params['direction']} {coin} (Confidence: {trade_params['confidence']}/10)")
-                                    execute_trade(coin, trade_params, market_data[coin]['price'])
-                                    opportunities_found += 1
+                                    # Additional risk/reward check
+                                    risk_reward = trade_params.get('tp_percentage', 0) / trade_params.get('sl_percentage', 1)
                                     
-                                    # Store pattern for learning
-                                    pattern_key = f"{coin}_{trade_params['direction']}"
-                                    pattern_memory[pattern_key] = {
-                                        'timeframe_data': multi_tf_data,
-                                        'confidence': trade_params['confidence'],
-                                        'timestamp': current_time
-                                    }
-                                    
-                                    # Limit trades per cycle to manage risk
-                                    if opportunities_found >= 2:
-                                        print(f"   📊 Trade limit reached (2 per cycle)")
-                                        break
+                                    if risk_reward >= 1.5:  # Minimum 1.5:1 risk/reward
+                                        print(f"   ✅ Opportunity: {trade_params['direction']} {coin}")
+                                        print(f"      Confidence: {trade_params['confidence']}/10 | R:R: 1:{risk_reward:.1f}")
+                                        execute_trade(coin, trade_params, market_data[coin]['price'])
+                                        opportunities_found += 1
+                                        
+                                        # Store pattern for learning
+                                        pattern_key = f"{coin}_{trade_params['direction']}_{regime_data['regime']}"
+                                        pattern_memory[pattern_key] = {
+                                            'timeframe_data': multi_tf_data,
+                                            'confidence': trade_params['confidence'],
+                                            'regime': regime_data['regime'],
+                                            'timestamp': current_time
+                                        }
+                                        
+                                        # Limit trades per cycle to manage risk
+                                        if opportunities_found >= 2:
+                                            print(f"   📊 Trade limit reached (2 per cycle)")
+                                            break
+                                    else:
+                                        print(f"   ⏭️ {coin}: Poor R:R (1:{risk_reward:.1f})")
                                 else:
                                     print(f"   ⏭️ {coin}: Low confidence ({trade_params['confidence']}/10)")
                         
@@ -1112,16 +1721,29 @@ def run_optimized_bot():
                 else:
                     print(f"\n⚠️ Position limit reached ({len(portfolio['positions'])}/{MAX_CONCURRENT_POSITIONS})")
                 
-                # Portfolio performance summary
+                # Portfolio performance summary with enhanced metrics
                 total_value = calculate_portfolio_value(market_data)
                 pnl = total_value - 1000
                 pnl_pct = (pnl / 1000) * 100
+                
+                # Calculate Sharpe ratio (simplified)
+                if portfolio['trade_history']:
+                    returns = [t['pnl_percent'] for t in portfolio['trade_history'][-20:]]
+                    if len(returns) > 1:
+                        avg_return = sum(returns) / len(returns)
+                        std_dev = math.sqrt(sum((r - avg_return) ** 2 for r in returns) / len(returns))
+                        sharpe = (avg_return / std_dev * math.sqrt(252)) if std_dev > 0 else 0
+                    else:
+                        sharpe = 0
+                else:
+                    sharpe = 0
                 
                 print(f"\n💼 PORTFOLIO PERFORMANCE:")
                 print(f"   Total Value: ${total_value:.2f}")
                 print(f"   P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%)")
                 print(f"   Free Balance: ${portfolio['balance']:.2f}")
                 print(f"   Active Positions: {len(portfolio['positions'])}")
+                print(f"   Sharpe Ratio: {sharpe:.2f}")
                 
                 # Cost tracking with projections
                 costs = get_cost_projections()
@@ -1151,5 +1773,5 @@ if __name__ == "__main__":
     flask_thread = threading.Thread(target=run_flask_app, daemon=True)
     flask_thread.start()
     
-    # Start optimized bot
-    run_optimized_bot()
+    # Start enhanced bot
+    run_enhanced_bot()

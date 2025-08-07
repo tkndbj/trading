@@ -1,12 +1,14 @@
 let portfolioChart = null;
+let performanceChart = null;
 
 // Initialize dashboard
 document.addEventListener("DOMContentLoaded", function () {
   initPortfolioChart();
+  initPerformanceChart();
   fetchData();
 
-  // Update every 30 seconds
-  setInterval(fetchData, 30000);
+  // Update every 15 seconds (more frequent for better real-time feel)
+  setInterval(fetchData, 15000);
 });
 
 function initPortfolioChart() {
@@ -38,6 +40,57 @@ function initPortfolioChart() {
   });
 }
 
+function initPerformanceChart() {
+  const ctx = document.getElementById("performance-chart");
+  if (!ctx) return;
+
+  performanceChart = new Chart(ctx.getContext("2d"), {
+    type: "line",
+    data: {
+      labels: [],
+      datasets: [
+        {
+          label: "Portfolio Value",
+          data: [],
+          borderColor: "#60a5fa",
+          backgroundColor: "rgba(96, 165, 250, 0.1)",
+          borderWidth: 2,
+          tension: 0.4,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: {
+          display: false,
+        },
+      },
+      scales: {
+        x: {
+          grid: {
+            color: "#374151",
+          },
+          ticks: {
+            color: "#9ca3af",
+          },
+        },
+        y: {
+          grid: {
+            color: "#374151",
+          },
+          ticks: {
+            color: "#9ca3af",
+            callback: function (value) {
+              return "$" + value.toFixed(0);
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
 async function fetchData() {
   try {
     const response = await fetch("/api/status");
@@ -48,8 +101,10 @@ async function fetchData() {
     updateLeveragePositions(data.positions, data.market_data);
     updateLeverageTradeHistory(data.trade_history);
     updatePortfolioChart(data);
+    updatePerformanceChart(data);
     updateLearningMetrics(data.learning_metrics);
     updateCostTracking(data.cost_tracking);
+    updateMarketRegimes(data.positions, data.market_data);
 
     // Store for global use
     window.data = data;
@@ -71,7 +126,13 @@ function updateSummaryCards(data) {
 
   const pnlElement = document.getElementById("total-pnl");
   const pnl = data.total_value - 1000;
-  pnlElement.textContent = `$${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`;
+  const pnlPercent = (pnl / 1000) * 100;
+  pnlElement.innerHTML = `
+    $${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+    <span class="text-sm font-normal">(${
+      pnlPercent >= 0 ? "+" : ""
+    }${pnlPercent.toFixed(1)}%)</span>
+  `;
   pnlElement.className = `text-2xl font-bold ${
     pnl >= 0 ? "text-green-400" : "text-red-400"
   }`;
@@ -83,6 +144,68 @@ function updateSummaryCards(data) {
     data.trade_history.length;
 }
 
+function updateMarketRegimes(positions, marketData) {
+  // Create market regimes section if not exists
+  let regimeContainer = document.getElementById("market-regimes");
+  if (!regimeContainer) {
+    const marketSection = document.getElementById("market-data-section");
+    if (!marketSection) return;
+
+    const regimeHTML = `
+      <div class="mt-4">
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">Market Regimes</h3>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-2" id="market-regimes">
+          <!-- Regimes will be populated here -->
+        </div>
+      </div>
+    `;
+    marketSection.insertAdjacentHTML("beforeend", regimeHTML);
+    regimeContainer = document.getElementById("market-regimes");
+  }
+
+  // Count positions by regime
+  const regimeCounts = {};
+  Object.values(positions).forEach((pos) => {
+    const regime = pos.market_regime || "UNKNOWN";
+    regimeCounts[regime] = (regimeCounts[regime] || 0) + 1;
+  });
+
+  const regimeIcons = {
+    TRENDING_UP: "🚀",
+    TRENDING_DOWN: "📉",
+    RANGING: "↔️",
+    VOLATILE: "⚡",
+    TRANSITIONAL: "🔄",
+    UNKNOWN: "❓",
+  };
+
+  const regimeColors = {
+    TRENDING_UP: "text-green-400",
+    TRENDING_DOWN: "text-red-400",
+    RANGING: "text-blue-400",
+    VOLATILE: "text-yellow-400",
+    TRANSITIONAL: "text-purple-400",
+    UNKNOWN: "text-gray-400",
+  };
+
+  let regimeHTML = "";
+  for (const [regime, count] of Object.entries(regimeCounts)) {
+    regimeHTML += `
+      <div class="bg-gray-700 rounded p-2 text-center">
+        <span class="text-lg">${regimeIcons[regime] || "?"}</span>
+        <p class="text-xs ${
+          regimeColors[regime] || "text-gray-400"
+        }">${regime.replace("_", " ")}</p>
+        <p class="text-sm font-bold">${count}</p>
+      </div>
+    `;
+  }
+
+  if (regimeHTML) {
+    regimeContainer.innerHTML = regimeHTML;
+  }
+}
+
 function updateCostTracking(costData) {
   if (!costData) return;
 
@@ -92,7 +215,7 @@ function updateCostTracking(costData) {
     const mainContainer = document.querySelector(".container");
     const costHTML = `
       <div class="mt-8" id="cost-tracking-section">
-        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6 shadow-xl">
           <h2 class="text-xl font-bold mb-6 text-yellow-400">
             <i class="fas fa-dollar-sign mr-2"></i>Service Costs & Projections
           </h2>
@@ -247,6 +370,14 @@ function updateMarketData(marketData) {
       data.change_24h >= 0 ? "text-green-400" : "text-red-400";
     const changeIcon = data.change_24h >= 0 ? "fa-arrow-up" : "fa-arrow-down";
 
+    // Volume indicator based on quote volume
+    const volumeIndicator =
+      data.quote_volume > 100000000
+        ? "🔥"
+        : data.quote_volume > 50000000
+        ? "📊"
+        : "💤";
+
     container.innerHTML += `
       <div class="flex items-center justify-between p-3 bg-gray-700 rounded-lg hover:bg-gray-600 transition-all duration-200">
         <div class="flex items-center">
@@ -263,9 +394,9 @@ function updateMarketData(marketData) {
             <i class="fas ${changeIcon} text-xs mr-1"></i>
             ${data.change_24h >= 0 ? "+" : ""}${data.change_24h.toFixed(2)}%
           </p>
-          <p class="text-gray-400 text-xs">Vol: ${(
-            data.volume / 1000000
-          ).toFixed(1)}M</p>
+          <p class="text-gray-400 text-xs">
+            Vol: ${(data.volume / 1000000).toFixed(1)}M ${volumeIndicator}
+          </p>
         </div>
       </div>
     `;
@@ -278,7 +409,7 @@ function updateLeveragePositions(positions, marketData) {
   if (Object.keys(positions).length === 0) {
     tbody.innerHTML = `
       <tr>
-        <td colspan="9" class="text-center py-8 text-gray-400">
+        <td colspan="10" class="text-center py-8 text-gray-400">
           <i class="fas fa-inbox text-4xl mb-4 block"></i>
           No active positions
         </td>
@@ -322,6 +453,17 @@ function updateLeveragePositions(positions, marketData) {
       direction === "LONG"
         ? ((position.take_profit - currentPrice) / currentPrice) * 100
         : ((currentPrice - position.take_profit) / currentPrice) * 100;
+
+    // Market regime icon
+    const regimeIcons = {
+      TRENDING_UP: "🚀",
+      TRENDING_DOWN: "📉",
+      RANGING: "↔️",
+      VOLATILE: "⚡",
+      TRANSITIONAL: "🔄",
+      UNKNOWN: "❓",
+    };
+    const regimeIcon = regimeIcons[position.market_regime] || "❓";
 
     tbody.innerHTML += `
       <tr class="border-b border-gray-700 hover:bg-gray-800">
@@ -370,6 +512,11 @@ function updateLeveragePositions(positions, marketData) {
             ${position.confidence || 5}/10
           </span>
         </td>
+        <td class="py-3 px-4 text-center" title="${
+          position.market_regime || "UNKNOWN"
+        }">
+          <span class="text-2xl">${regimeIcon}</span>
+        </td>
       </tr>
     `;
   });
@@ -381,7 +528,7 @@ function updateLeverageTradeHistory(tradeHistory) {
   if (tradeHistory.length === 0) {
     tbody.innerHTML = `
       <tr>
-        <td colspan="7" class="text-center py-8 text-gray-400">
+        <td colspan="8" class="text-center py-8 text-gray-400">
           <i class="fas fa-chart-line text-4xl mb-4 block"></i>
           No trades yet - AI is analyzing market conditions
         </td>
@@ -418,6 +565,18 @@ function updateLeverageTradeHistory(tradeHistory) {
         }
       }
 
+      // Risk/Reward calculation if available
+      let rrCell = "-";
+      if (trade.stop_loss && trade.take_profit && trade.price && !isClose) {
+        const slRisk = Math.abs(trade.price - trade.stop_loss) / trade.price;
+        const tpReward =
+          Math.abs(trade.take_profit - trade.price) / trade.price;
+        const rr = tpReward / slRisk;
+        rrCell = `<span class="text-xs text-gray-400">1:${rr.toFixed(
+          1
+        )}</span>`;
+      }
+
       tbody.innerHTML += `
       <tr class="border-b border-gray-700">
         <td class="py-3 px-4 text-sm">${new Date(
@@ -437,6 +596,7 @@ function updateLeverageTradeHistory(tradeHistory) {
             : "-"
         }</td>
         <td class="py-3 px-4">${pnlCell}</td>
+        <td class="py-3 px-4">${rrCell}</td>
       </tr>
     `;
     });
@@ -448,12 +608,15 @@ function updateLearningMetrics(metrics) {
     const mainContainer = document.querySelector(".container");
     const metricsHTML = `
       <div class="mt-8" id="learning-metrics-section">
-        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6 shadow-xl">
           <h2 class="text-xl font-bold mb-6 text-blue-400">
             <i class="fas fa-brain mr-2"></i>AI Learning Metrics
           </h2>
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="learning-metrics">
+          <div class="grid grid-cols-2 md:grid-cols-5 gap-4" id="learning-metrics">
             <!-- Metrics will be populated here -->
+          </div>
+          <div class="mt-4" id="regime-performance">
+            <!-- Regime performance will be populated here -->
           </div>
         </div>
       </div>
@@ -463,6 +626,27 @@ function updateLearningMetrics(metrics) {
   }
 
   if (metrics) {
+    // Calculate Sharpe ratio if we have trade history
+    let sharpeRatio = 0;
+    if (
+      window.data &&
+      window.data.trade_history &&
+      window.data.trade_history.length > 5
+    ) {
+      const returns = window.data.trade_history
+        .filter((t) => t.pnl_percent !== undefined)
+        .map((t) => t.pnl_percent);
+
+      if (returns.length > 1) {
+        const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
+        const variance =
+          returns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) /
+          returns.length;
+        const stdDev = Math.sqrt(variance);
+        sharpeRatio = stdDev > 0 ? (avgReturn / stdDev) * Math.sqrt(252) : 0;
+      }
+    }
+
     metricsContainer.innerHTML = `
       <div class="text-center bg-gray-700 rounded p-3">
         <p class="text-2xl font-bold ${
@@ -490,6 +674,114 @@ function updateLearningMetrics(metrics) {
         </p>
         <p class="text-gray-400 text-sm">Avg P&L</p>
       </div>
+      <div class="text-center bg-gray-700 rounded p-3">
+        <p class="text-2xl font-bold ${
+          sharpeRatio >= 1
+            ? "text-green-400"
+            : sharpeRatio >= 0
+            ? "text-yellow-400"
+            : "text-red-400"
+        }">
+          ${sharpeRatio.toFixed(2)}
+        </p>
+        <p class="text-gray-400 text-sm">Sharpe Ratio</p>
+      </div>
     `;
+
+    // Show regime performance if available
+    if (
+      metrics.regime_performance &&
+      Object.keys(metrics.regime_performance).length > 0
+    ) {
+      const regimePerf = document.getElementById("regime-performance");
+      if (regimePerf) {
+        let perfHTML =
+          '<h3 class="text-sm font-semibold text-gray-400 mb-2 mt-4">Performance by Market Regime</h3><div class="grid grid-cols-2 md:grid-cols-4 gap-2">';
+
+        for (const [regime, data] of Object.entries(
+          metrics.regime_performance
+        )) {
+          const avgPnl = data.avg_pnl || 0;
+          const pnlColor = avgPnl >= 0 ? "text-green-400" : "text-red-400";
+          perfHTML += `
+            <div class="bg-gray-700 rounded p-2 text-center">
+              <p class="text-xs text-gray-400">${regime.replace("_", " ")}</p>
+              <p class="${pnlColor} font-bold">${avgPnl.toFixed(1)}%</p>
+              <p class="text-xs text-gray-500">${data.count} trades</p>
+            </div>
+          `;
+        }
+
+        perfHTML += "</div>";
+        regimePerf.innerHTML = perfHTML;
+      }
+    }
   }
+}
+
+function updatePortfolioChart(data) {
+  if (!portfolioChart) return;
+
+  const positions = Object.values(data.positions);
+  const labels = ["Cash"];
+  const values = [data.balance];
+  const colors = ["#60a5fa"];
+
+  positions.forEach((position, index) => {
+    labels.push(`${position.coin} ${position.direction}`);
+    values.push(position.position_size);
+    colors.push(getColorForIndex(index));
+  });
+
+  portfolioChart.data.labels = labels;
+  portfolioChart.data.datasets[0].data = values;
+  portfolioChart.data.datasets[0].backgroundColor = colors;
+  portfolioChart.update();
+}
+
+function updatePerformanceChart(data) {
+  if (!performanceChart) return;
+
+  // Update with latest portfolio value
+  const currentTime = new Date().toLocaleTimeString();
+
+  // Keep only last 20 data points
+  if (performanceChart.data.labels.length >= 20) {
+    performanceChart.data.labels.shift();
+    performanceChart.data.datasets[0].data.shift();
+  }
+
+  performanceChart.data.labels.push(currentTime);
+  performanceChart.data.datasets[0].data.push(data.total_value);
+  performanceChart.update();
+}
+
+function calculateDuration(entryTime) {
+  const entry = new Date(entryTime);
+  const now = new Date();
+  const diff = now - entry;
+  const hours = Math.floor(diff / 3600000);
+  const minutes = Math.floor((diff % 3600000) / 60000);
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  } else {
+    return `${minutes}m`;
+  }
+}
+
+function getColorForIndex(index) {
+  const colors = [
+    "#f87171",
+    "#fb923c",
+    "#fbbf24",
+    "#a3e635",
+    "#34d399",
+    "#22d3ee",
+    "#60a5fa",
+    "#a78bfa",
+    "#f472b6",
+    "#fb7185",
+  ];
+  return colors[index % colors.length];
 }

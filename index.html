@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Smart AI Trading Bot Dashboard</title>
+    <title>Enhanced AI Trading Bot Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link
@@ -26,6 +26,21 @@
       ::-webkit-scrollbar-thumb:hover {
         background: #6b7280;
       }
+
+      /* Animations */
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.5;
+        }
+      }
+
+      .pulse {
+        animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+      }
     </style>
   </head>
   <body class="bg-gray-900 text-white min-h-screen">
@@ -36,9 +51,14 @@
           <h1
             class="text-2xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent"
           >
-            <i class="fas fa-brain mr-2"></i>Smart AI Trading Bot
+            <i class="fas fa-brain mr-2"></i>Enhanced AI Trading Bot
           </h1>
           <div class="flex items-center space-x-4">
+            <div class="text-xs text-gray-400">
+              <span class="mr-2">⚡ Advanced Mode</span>
+              <span class="mr-2">📊 Multi-Indicator</span>
+              <span>🎯 Dynamic Risk</span>
+            </div>
             <div class="connection-status text-green-400">
               <i class="fas fa-circle text-xs mr-1"></i>
               <span class="text-sm">LIVE</span>
@@ -110,6 +130,7 @@
         <div class="lg:col-span-2">
           <div
             class="bg-gray-800 rounded-lg border border-gray-700 p-6 shadow-xl"
+            id="market-data-section"
           >
             <h2 class="text-xl font-bold mb-6 text-blue-400">
               <i class="fas fa-chart-candlestick mr-2"></i>Live Market Data
@@ -120,8 +141,8 @@
           </div>
         </div>
 
-        <!-- Portfolio Allocation -->
-        <div>
+        <!-- Portfolio Allocation & Performance -->
+        <div class="space-y-6">
           <div
             class="bg-gray-800 rounded-lg border border-gray-700 p-6 shadow-xl"
           >
@@ -129,6 +150,15 @@
               <i class="fas fa-pie-chart mr-2"></i>Portfolio Allocation
             </h2>
             <canvas id="portfolio-chart" width="300" height="300"></canvas>
+          </div>
+
+          <div
+            class="bg-gray-800 rounded-lg border border-gray-700 p-6 shadow-xl"
+          >
+            <h2 class="text-xl font-bold mb-6 text-green-400">
+              <i class="fas fa-chart-area mr-2"></i>Performance
+            </h2>
+            <canvas id="performance-chart" width="300" height="150"></canvas>
           </div>
         </div>
       </div>
@@ -140,6 +170,9 @@
         >
           <h2 class="text-xl font-bold mb-6 text-blue-400">
             <i class="fas fa-chart-area mr-2"></i>Active Leveraged Positions
+            <span class="text-sm font-normal text-gray-400 ml-2"
+              >with Dynamic Risk Management</span
+            >
           </h2>
           <div class="overflow-x-auto">
             <table class="w-full" id="positions-table">
@@ -156,11 +189,12 @@
                   <th class="text-center py-3 px-4 text-gray-400">
                     Confidence
                   </th>
+                  <th class="text-center py-3 px-4 text-gray-400">Regime</th>
                 </tr>
               </thead>
               <tbody id="positions-body">
                 <tr>
-                  <td colspan="9" class="text-center py-8 text-gray-400">
+                  <td colspan="10" class="text-center py-8 text-gray-400">
                     <i class="fas fa-inbox text-4xl mb-4 block"></i>
                     No active positions
                   </td>
@@ -178,6 +212,9 @@
         >
           <h2 class="text-xl font-bold mb-6 text-blue-400">
             <i class="fas fa-history mr-2"></i>Recent Trades
+            <span class="text-sm font-normal text-gray-400 ml-2"
+              >with Risk/Reward Analysis</span
+            >
           </h2>
           <div class="overflow-x-auto">
             <table class="w-full" id="trades-table">
@@ -192,11 +229,12 @@
                   </th>
                   <th class="text-left py-3 px-4 text-gray-400">Notional</th>
                   <th class="text-left py-3 px-4 text-gray-400">P&L</th>
+                  <th class="text-center py-3 px-4 text-gray-400">R:R</th>
                 </tr>
               </thead>
               <tbody id="trades-body">
                 <tr>
-                  <td colspan="7" class="text-center py-8 text-gray-400">
+                  <td colspan="8" class="text-center py-8 text-gray-400">
                     <i class="fas fa-chart-line text-4xl mb-4 block"></i>
                     No trades yet - AI is analyzing market conditions
                   </td>
@@ -208,6 +246,57 @@
       </div>
 
       <!-- AI Learning Metrics and Cost Tracking sections will be added dynamically by JavaScript -->
+
+      <!-- Bot Status -->
+      <div class="mt-8">
+        <div
+          class="bg-gray-800 rounded-lg border border-gray-700 p-6 shadow-xl"
+        >
+          <h2 class="text-xl font-bold mb-6 text-purple-400">
+            <i class="fas fa-robot mr-2"></i>Bot Status
+          </h2>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div class="text-center bg-gray-700 rounded p-3">
+              <p class="text-sm text-gray-400">Quick Checks</p>
+              <p class="text-lg font-bold text-green-400">Every 15s</p>
+            </div>
+            <div class="text-center bg-gray-700 rounded p-3">
+              <p class="text-sm text-gray-400">Full Analysis</p>
+              <p class="text-lg font-bold text-blue-400">Every 2m</p>
+            </div>
+            <div class="text-center bg-gray-700 rounded p-3">
+              <p class="text-sm text-gray-400">Max Positions</p>
+              <p class="text-lg font-bold text-yellow-400">4</p>
+            </div>
+            <div class="text-center bg-gray-700 rounded p-3">
+              <p class="text-sm text-gray-400">Min Confidence</p>
+              <p class="text-lg font-bold text-purple-400">6/10</p>
+            </div>
+          </div>
+
+          <div class="mt-4 text-xs text-gray-400">
+            <p class="mb-1">
+              <span class="text-green-400">✓</span> Volume Profile Analysis
+            </p>
+            <p class="mb-1">
+              <span class="text-green-400">✓</span> Support/Resistance Detection
+            </p>
+            <p class="mb-1">
+              <span class="text-green-400">✓</span> Market Regime Detection
+            </p>
+            <p class="mb-1">
+              <span class="text-green-400">✓</span> Dynamic Stop Loss & Take
+              Profit
+            </p>
+            <p class="mb-1">
+              <span class="text-green-400">✓</span> Trailing Stops
+            </p>
+            <p>
+              <span class="text-green-400">✓</span> Multi-Timeframe Confluence
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
 
     <script>
