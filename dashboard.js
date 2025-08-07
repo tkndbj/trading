@@ -209,9 +209,9 @@ function updateMarketRegimes(positions, marketData) {
 function updateCostTracking(costData) {
   if (!costData) return;
 
-  // Create cost tracking section if not exists
-  let costContainer = document.getElementById("cost-tracking");
-  if (!costContainer) {
+  // Check if cost tracking section already exists
+  let costSection = document.getElementById("cost-tracking-section");
+  if (!costSection) {
     const mainContainer = document.querySelector(".container");
     const costHTML = `
       <div class="mt-8" id="cost-tracking-section">
@@ -603,8 +603,9 @@ function updateLeverageTradeHistory(tradeHistory) {
 }
 
 function updateLearningMetrics(metrics) {
-  let metricsContainer = document.getElementById("learning-metrics");
-  if (!metricsContainer) {
+  // Check if learning metrics section already exists
+  let metricsSection = document.getElementById("learning-metrics-section");
+  if (!metricsSection) {
     const mainContainer = document.querySelector(".container");
     const metricsHTML = `
       <div class="mt-8" id="learning-metrics-section">
@@ -622,10 +623,10 @@ function updateLearningMetrics(metrics) {
       </div>
     `;
     mainContainer.insertAdjacentHTML("beforeend", metricsHTML);
-    metricsContainer = document.getElementById("learning-metrics");
   }
 
-  if (metrics) {
+  const metricsContainer = document.getElementById("learning-metrics");
+  if (metrics && metricsContainer) {
     // Calculate Sharpe ratio if we have trade history
     let sharpeRatio = 0;
     if (
