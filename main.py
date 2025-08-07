@@ -8,9 +8,231 @@ from datetime import datetime, timedelta
 from flask import Flask, jsonify, send_from_directory
 import threading
 import math
+import sqlite3
 
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
+
+# Database setup
+def init_database():
+    """Initialize SQLite database with trading tables"""
+    conn = sqlite3.connect('trading_bot.db')
+    cursor = conn.cursor()
+    
+    # Trades table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            position_id TEXT UNIQUE,
+            coin TEXT NOT NULL,
+            action TEXT NOT NULL,
+            direction TEXT,
+            price REAL NOT NULL,
+            position_size REAL,
+            leverage INTEGER,
+            notional_value REAL,
+            stop_loss REAL,
+            take_profit REAL,
+            pnl REAL,
+            pnl_percent REAL,
+            duration TEXT,
+            reason TEXT,
+            confidence INTEGER,
+            profitable BOOLEAN,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Learning patterns table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS learning_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            coin TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            leverage INTEGER NOT NULL,
+            confidence INTEGER NOT NULL,
+            duration_target TEXT NOT NULL,
+            profitable BOOLEAN NOT NULL,
+            pnl_percent REAL NOT NULL,
+            duration_actual TEXT,
+            market_conditions TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Performance metrics table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS performance_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            metric_name TEXT UNIQUE NOT NULL,
+            metric_value REAL NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    print("📁 SQLite database initialized")
+
+def save_trade_to_db(trade_record):
+    """Save trade record to database"""
+    conn = sqlite3.connect('trading_bot.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT OR REPLACE INTO trades 
+        (timestamp, position_id, coin, action, direction, price, position_size, 
+         leverage, notional_value, stop_loss, take_profit, pnl, pnl_percent, 
+         duration, reason, confidence, profitable)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        trade_record.get('time'),
+        trade_record.get('position_id'),
+        trade_record.get('coin'),
+        trade_record.get('action'),
+        trade_record.get('direction'),
+        trade_record.get('price'),
+        trade_record.get('position_size'),
+        trade_record.get('leverage'),
+        trade_record.get('notional_value'),
+        trade_record.get('stop_loss'),
+        trade_record.get('take_profit'),
+        trade_record.get('pnl'),
+        trade_record.get('pnl_percent'),
+        trade_record.get('duration'),
+        trade_record.get('reason'),
+        trade_record.get('confidence'),
+        trade_record.get('pnl', 0) > 0 if 'pnl' in trade_record else None
+    ))
+    
+    conn.commit()
+    conn.close()
+
+def save_learning_pattern_to_db(pattern):
+    """Save learning pattern to database"""
+    conn = sqlite3.connect('trading_bot.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT INTO learning_patterns 
+        (coin, direction, leverage, confidence, duration_target, profitable, 
+         pnl_percent, duration_actual, market_conditions)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        pattern['coin'],
+        pattern['direction'],
+        pattern['leverage'],
+        pattern['entry_conditions']['confidence'],
+        pattern['entry_conditions']['duration_target'],
+        pattern['outcome']['profitable'],
+        pattern['outcome']['pnl_percent'],
+        str(pattern['outcome']['duration']),
+        json.dumps(pattern.get('market_conditions', {}))
+    ))
+    
+    conn.commit()
+    conn.close()
+
+def get_learning_insights():
+    """Get AI learning insights from database"""
+    conn = sqlite3.connect('trading_bot.db')
+    cursor = conn.cursor()
+    
+    insights = {}
+    
+    # Win rate
+    cursor.execute('SELECT COUNT(*) FROM trades WHERE pnl IS NOT NULL')
+    total_trades = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT COUNT(*) FROM trades WHERE pnl > 0')
+    winning_trades = cursor.fetchone()[0]
+    
+    insights['win_rate'] = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+    insights['total_trades'] = total_trades
+    
+    # Best performing leverage
+    cursor.execute('''
+        SELECT leverage, AVG(pnl) as avg_pnl, COUNT(*) as count 
+        FROM trades 
+        WHERE pnl IS NOT NULL AND leverage IS NOT NULL
+        GROUP BY leverage 
+        ORDER BY avg_pnl DESC
+    ''')
+    leverage_performance = cursor.fetchall()
+    insights['best_leverage'] = leverage_performance[0][0] if leverage_performance else 10
+    
+    # Best performing coins
+    cursor.execute('''
+        SELECT coin, AVG(pnl) as avg_pnl, COUNT(*) as count,
+               SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as win_rate
+        FROM trades 
+        WHERE pnl IS NOT NULL 
+        GROUP BY coin 
+        ORDER BY avg_pnl DESC
+    ''')
+    coin_performance = cursor.fetchall()
+    insights['coin_performance'] = coin_performance
+    
+    # Average profit/loss
+    cursor.execute('SELECT AVG(pnl) FROM trades WHERE pnl > 0')
+    avg_profit = cursor.fetchone()[0]
+    insights['avg_profit'] = avg_profit if avg_profit else 0
+    
+    cursor.execute('SELECT AVG(pnl) FROM trades WHERE pnl < 0')
+    avg_loss = cursor.fetchone()[0]
+    insights['avg_loss'] = avg_loss if avg_loss else 0
+    
+    # Recent performance trends
+    cursor.execute('''
+        SELECT DATE(created_at) as trade_date, 
+               SUM(pnl) as daily_pnl,
+               COUNT(*) as daily_trades
+        FROM trades 
+        WHERE pnl IS NOT NULL AND created_at >= datetime('now', '-7 days')
+        GROUP BY DATE(created_at)
+        ORDER BY trade_date DESC
+    ''')
+    recent_performance = cursor.fetchall()
+    insights['recent_performance'] = recent_performance
+    
+    conn.close()
+    return insights
+
+def load_portfolio_from_db():
+    """Load existing portfolio state from database"""
+    global portfolio
+    
+    # Load recent trade history (last 50 trades)
+    conn = sqlite3.connect('trading_bot.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT * FROM trades 
+        ORDER BY created_at DESC 
+        LIMIT 50
+    ''')
+    
+    db_trades = cursor.fetchall()
+    columns = [description[0] for description in cursor.description]
+    
+    portfolio['trade_history'] = []
+    for trade in db_trades:
+        trade_dict = dict(zip(columns, trade))
+        portfolio['trade_history'].append({
+            'time': trade_dict['timestamp'],
+            'position_id': trade_dict['position_id'],
+            'coin': trade_dict['coin'],
+            'action': trade_dict['action'],
+            'price': trade_dict['price'],
+            'position_size': trade_dict['position_size'],
+            'pnl': trade_dict['pnl'],
+            'pnl_percent': trade_dict['pnl_percent'],
+            'reason': trade_dict['reason']
+        })
+    
+    conn.close()
+    print(f"📊 Loaded {len(portfolio['trade_history'])} previous trades from database")
 
 # Advanced Leverage Trading Portfolio
 portfolio = {
@@ -50,18 +272,64 @@ def api_status():
         current_market_data = get_market_data()
         total_value = calculate_portfolio_value(current_market_data)
         
+        # Get learning insights from database
+        learning_insights = get_learning_insights()
+        
         response_data = {
             'total_value': total_value,
             'balance': portfolio['balance'],
             'positions': portfolio['positions'],
-            'trade_history': portfolio['trade_history'],
+            'trade_history': portfolio['trade_history'][-20:],  # Last 20 trades
             'market_data': current_market_data,
-            'learning_metrics': portfolio['learning_data']['performance_metrics'],
+            'learning_metrics': learning_insights,
             'timestamp': datetime.now().isoformat()
         }
         
         return jsonify(response_data)
     
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/analytics')
+def api_analytics():
+    """Advanced analytics endpoint"""
+    try:
+        conn = sqlite3.connect('trading_bot.db')
+        cursor = conn.cursor()
+        
+        # Performance over time
+        cursor.execute('''
+            SELECT DATE(created_at) as date, 
+                   SUM(pnl) as daily_pnl,
+                   COUNT(*) as trades_count,
+                   AVG(pnl) as avg_pnl
+            FROM trades 
+            WHERE pnl IS NOT NULL 
+            GROUP BY DATE(created_at) 
+            ORDER BY date DESC 
+            LIMIT 30
+        ''')
+        performance_data = cursor.fetchall()
+        
+        # Leverage analysis
+        cursor.execute('''
+            SELECT leverage, 
+                   COUNT(*) as trade_count,
+                   AVG(pnl) as avg_pnl,
+                   SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as win_rate
+            FROM trades 
+            WHERE pnl IS NOT NULL AND leverage IS NOT NULL
+            GROUP BY leverage
+        ''')
+        leverage_analysis = cursor.fetchall()
+        
+        conn.close()
+        
+        return jsonify({
+            'performance_over_time': performance_data,
+            'leverage_analysis': leverage_analysis
+        })
+        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -159,8 +427,8 @@ def analyze_market_sentiment(market_data, price_histories):
     
     return sentiment_scores
 
-def ai_determine_trade_params(coin, market_data, sentiment, price_histories, learning_data):
-    """AI determines optimal trade parameters"""
+def ai_determine_trade_params(coin, market_data, sentiment, price_histories, learning_insights):
+    """AI determines optimal trade parameters using database insights"""
     if not client:
         return None
     
@@ -171,11 +439,18 @@ def ai_determine_trade_params(coin, market_data, sentiment, price_histories, lea
     recent_prices = price_histories.get(coin, [])[-20:] if coin in price_histories else []
     price_volatility = statistics.stdev(recent_prices) if len(recent_prices) > 5 else 0
     
-    # Build comprehensive analysis
+    # Use learning insights for better decisions
+    coin_performance = None
+    for perf in learning_insights.get('coin_performance', []):
+        if perf[0] == coin:
+            coin_performance = perf
+            break
+    
+    # Build comprehensive analysis with learning data
     analysis_prompt = f"""
-LEVERAGE TRADING ANALYSIS for {coin}
+ADVANCED LEVERAGE TRADING ANALYSIS for {coin}
 
-MARKET DATA:
+CURRENT MARKET DATA:
 Price: ${current_price:,.2f}
 24h Change: {market_data[coin]['change_24h']:+.2f}%
 RSI: {rsi:.1f}
@@ -183,25 +458,34 @@ Sentiment Score: {sentiment:.1f}/100
 Price Volatility: {price_volatility:.2f}
 Volume: {market_data[coin]['volume']:,.0f}
 
-LEARNING DATA:
-Historical Win Rate: {learning_data['performance_metrics']['win_rate']:.1f}%
-Best Performing Leverage: {learning_data['performance_metrics']['best_leverage']}x
-Average Profit: ${learning_data['performance_metrics']['avg_profit']:.2f}
-Average Loss: ${learning_data['performance_metrics']['avg_loss']:.2f}
+AI LEARNING INSIGHTS:
+Overall Win Rate: {learning_insights.get('win_rate', 0):.1f}%
+Total Historical Trades: {learning_insights.get('total_trades', 0)}
+Best Performing Leverage: {learning_insights.get('best_leverage', 10)}x
+Average Profit: ${learning_insights.get('avg_profit', 0):.2f}
+Average Loss: ${learning_insights.get('avg_loss', 0):.2f}
 
-ANALYSIS REQUIREMENTS:
+{coin} HISTORICAL PERFORMANCE:
+{f"Average P&L: ${coin_performance[1]:.2f}" if coin_performance else "No historical data"}
+{f"Win Rate: {coin_performance[3]:.1f}%" if coin_performance else ""}
+{f"Trade Count: {coin_performance[2]}" if coin_performance else ""}
+
+RECENT PERFORMANCE TREND:
+{learning_insights.get('recent_performance', [])[:3]}
+
+ENHANCED ANALYSIS REQUIREMENTS:
 1. Trade Direction: LONG (bullish) or SHORT (bearish) or SKIP
-2. Leverage: 10-20x based on opportunity strength
-3. Position Size: 5-10% of portfolio based on confidence
-4. Stop Loss: Dynamic based on volatility and risk
-5. Take Profit: Risk/reward ratio of at least 2:1
-6. Trade Duration: SCALP (minutes), SWING (hours), POSITION (days)
+2. Leverage: 10-20x (use learning insights for optimization)
+3. Position Size: 5-10% (adjust based on historical performance)
+4. Stop Loss: Dynamic based on volatility and learned patterns
+5. Take Profit: Optimize based on historical success rates
+6. Trade Duration: SCALP/SWING/POSITION based on what worked before
 
-Consider:
-- Strong bullish signals: RSI <30, positive momentum, high volume
-- Strong bearish signals: RSI >70, negative momentum, high volume
-- High volatility = lower leverage, tighter stops
-- Use learning data to avoid repeated mistakes
+LEARNING-BASED DECISION FACTORS:
+- If this coin historically underperforms, reduce position size
+- If recent trades are losing, be more conservative
+- Use best performing leverage from database
+- Apply lessons from similar market conditions
 
 Provide analysis in this format:
 DECISION: [LONG/SHORT/SKIP]
@@ -211,14 +495,14 @@ STOP_LOSS: [percentage from entry]
 TAKE_PROFIT: [percentage from entry]
 DURATION: [SCALP/SWING/POSITION]
 CONFIDENCE: [1-10]
-REASONING: [Brief explanation]
+REASONING: [Brief explanation with learning insights]
 """
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": analysis_prompt}],
-            max_tokens=200
+            max_tokens=250
         )
         
         ai_response = response.choices[0].message.content.strip()
@@ -311,7 +595,8 @@ def execute_leverage_trade(coin, trade_params, current_price):
         'take_profit': take_profit_price,
         'reasoning': trade_params['reasoning']
     }
-    portfolio['trade_history'].append(trade_record)
+    # Record trade in database
+    save_trade_to_db(trade_record)
     
     direction_emoji = "📈" if trade_params['direction'] == 'LONG' else "📉"
     print(f"   {direction_emoji} OPENED {trade_params['direction']} {coin}: ${position_value:.2f} @ {leverage}x leverage")
@@ -428,6 +713,10 @@ def close_position(position_id, position, current_price, reason, pnl_amount):
         'reason': reason,
         'duration': str(datetime.now() - datetime.strptime(position['entry_time'], '%Y-%m-%d %H:%M:%S'))
     }
+    # Record closing trade in database
+    save_trade_to_db(trade_record)
+    
+    # Add to in-memory history for immediate dashboard access
     portfolio['trade_history'].append(trade_record)
     
     # Learn from the trade
@@ -441,9 +730,7 @@ def close_position(position_id, position, current_price, reason, pnl_amount):
     print(f"      Reason: {reason}")
 
 def learn_from_trade(position, trade_record):
-    """Machine learning from completed trades"""
-    global portfolio
-    
+    """Machine learning from completed trades with database storage"""
     was_profitable = trade_record['pnl'] > 0
     
     # Extract trade pattern
@@ -462,50 +749,29 @@ def learn_from_trade(position, trade_record):
         }
     }
     
-    # Store pattern
+    # Save pattern to database
+    save_learning_pattern_to_db(trade_pattern)
+    
+    # Update in-memory learning data for immediate use
     if was_profitable:
         portfolio['learning_data']['successful_patterns'].append(trade_pattern)
+        if len(portfolio['learning_data']['successful_patterns']) > 50:
+            portfolio['learning_data']['successful_patterns'] = portfolio['learning_data']['successful_patterns'][-50:]
     else:
         portfolio['learning_data']['failed_patterns'].append(trade_pattern)
-    
-    # Update performance metrics
-    update_performance_metrics()
+        if len(portfolio['learning_data']['failed_patterns']) > 50:
+            portfolio['learning_data']['failed_patterns'] = portfolio['learning_data']['failed_patterns'][-50:]
 
 def update_performance_metrics():
-    """Update learning performance metrics"""
-    global portfolio
-    
-    all_trades = [t for t in portfolio['trade_history'] if 'pnl' in t]
-    
-    if len(all_trades) == 0:
-        return
-    
-    profitable_trades = [t for t in all_trades if t['pnl'] > 0]
-    losing_trades = [t for t in all_trades if t['pnl'] < 0]
-    
-    metrics = portfolio['learning_data']['performance_metrics']
-    
-    # Win rate
-    metrics['win_rate'] = (len(profitable_trades) / len(all_trades)) * 100
-    
-    # Average profit/loss
-    if profitable_trades:
-        metrics['avg_profit'] = statistics.mean([t['pnl'] for t in profitable_trades])
-    if losing_trades:
-        metrics['avg_loss'] = statistics.mean([t['pnl'] for t in losing_trades])
-    
-    # Best leverage (most profitable on average)
-    leverage_performance = {}
-    for trade in all_trades:
-        lev = trade.get('leverage', 10)
-        if lev not in leverage_performance:
-            leverage_performance[lev] = []
-        leverage_performance[lev].append(trade['pnl'])
-    
-    if leverage_performance:
-        best_lev = max(leverage_performance.keys(), 
-                      key=lambda x: statistics.mean(leverage_performance[x]))
-        metrics['best_leverage'] = best_lev
+    """Update learning performance metrics from database"""
+    learning_insights = get_learning_insights()
+    portfolio['learning_data']['performance_metrics'] = {
+        'win_rate': learning_insights.get('win_rate', 0),
+        'avg_profit': learning_insights.get('avg_profit', 0),
+        'avg_loss': learning_insights.get('avg_loss', 0),
+        'best_leverage': learning_insights.get('best_leverage', 10),
+        'total_trades': learning_insights.get('total_trades', 0)
+    }
 
 def calculate_portfolio_value(market_data):
     """Calculate total portfolio value including leveraged positions"""
@@ -567,9 +833,9 @@ def display_portfolio_status(market_data):
             print(f"           Unrealized P&L: ${pnl_amount:+.2f} ({pnl_percent*100:+.2f}%)")
 
 def comprehensive_market_analysis(market_data, price_histories):
-    """Comprehensive AI analysis for all coins"""
+    """Comprehensive AI analysis for all coins using database insights"""
     sentiment_scores = analyze_market_sentiment(market_data, price_histories)
-    learning_data = portfolio['learning_data']
+    learning_insights = get_learning_insights()  # Get insights from database
     
     trading_opportunities = {}
     
@@ -580,7 +846,7 @@ def comprehensive_market_analysis(market_data, price_histories):
             continue
             
         trade_params = ai_determine_trade_params(
-            coin, market_data, sentiment_scores[coin], price_histories, learning_data
+            coin, market_data, sentiment_scores[coin], price_histories, learning_insights
         )
         
         if trade_params and trade_params['direction'] != 'SKIP':
@@ -589,13 +855,20 @@ def comprehensive_market_analysis(market_data, price_histories):
     return trading_opportunities, sentiment_scores
 
 def run_trading_bot():
-    """Advanced leverage trading bot loop"""
+    """Advanced leverage trading bot loop with database persistence"""
+    # Initialize database
+    init_database()
+    
+    # Load existing data from database
+    load_portfolio_from_db()
+    
     price_histories = {'BTC': [], 'ETH': [], 'SOL': [], 'BNB': []}
     
     print("🚀 AI LEVERAGE TRADING BOT STARTED")
     print("💰 Starting Balance: $1,000")
     print("⚡ Leverage: 10-20x based on AI confidence")
     print("🧠 AI Learning: Adapting from every trade")
+    print("📁 SQLite Database: Persistent learning enabled")
     print("🌐 Dashboard available at: http://localhost:5000")
     
     while True:
@@ -642,6 +915,9 @@ def run_trading_bot():
                         execute_leverage_trade(coin, params, current_price)
                 else:
                     print(f"\n🤖 AI ANALYSIS: No high-confidence opportunities found")
+                    
+                # Update performance metrics from database
+                update_performance_metrics()
             else:
                 data_count = min(len(h) for h in price_histories.values())
                 print(f"\n📈 Building AI database... ({data_count}/10 data points)")
