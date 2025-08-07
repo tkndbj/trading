@@ -155,6 +155,14 @@ def init_database():
             positions_checked INTEGER DEFAULT 0
         )
     ''')
+
+    # Hyperparameters table for auto-tuning
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS hyperparameters (
+            key TEXT PRIMARY KEY,
+            value REAL NOT NULL
+        )
+    ''')
     
     conn.commit()
     conn.close()
@@ -278,6 +286,21 @@ def save_active_position(position_id, position):
         position.get('atr', 0)
     ))
     
+    conn.commit()
+    conn.close()
+
+def get_hyperparameter(key, default):
+    conn = sqlite3.connect('trading_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT value FROM hyperparameters WHERE key=?', (key,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else default
+
+def set_hyperparameter(key, value):
+    conn = sqlite3.connect('trading_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR REPLACE INTO hyperparameters (key, value) VALUES (?, ?)', (key, value))
     conn.commit()
     conn.close()
 
@@ -405,6 +428,15 @@ def get_batch_market_data():
     except Exception as e:
         print(f"Error fetching batch market data: {e}")
         return {}
+    
+def kelly_size(win_rate, risk_reward):
+    # b = risk/reward ratio, p = win rate, q = 1-p
+    b = risk_reward
+    p = win_rate
+    q = 1 - p
+    kelly = (b*p - q)/b if b > 0 else 0
+    # Be conservative: clamp to [0, 0.25]
+    return max(0, min(0.25, kelly))
 
 def get_quick_prices(coins):
     """Get only prices for specific coins - lightweight"""
@@ -747,9 +779,8 @@ def calculate_macd(prices):
 def calculate_dynamic_stops(current_price, atr, support_levels, resistance_levels, direction, market_regime):
     """Calculate dynamic stop loss and take profit based on market conditions"""
     
-    # Base multipliers adjusted by market regime
-    sl_multiplier = 1.5  # Base stop loss ATR multiplier
-    tp_multiplier = 2.5  # Base take profit ATR multiplier
+    sl_multiplier = get_hyperparameter('sl_multiplier', 1.5)
+    tp_multiplier = get_hyperparameter('tp_multiplier', 2.5)
     
     if market_regime == 'VOLATILE':
         sl_multiplier = 2.0  # Wider stop in volatile markets
@@ -1248,7 +1279,13 @@ def execute_trade(coin, trade_params, current_price):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
     # Position sizing
-    position_value = portfolio['balance'] * trade_params['position_size']
+    winrate, rr = get_recent_winrate_and_rr(50)
+    kelly_fraction = kelly_size(winrate, rr)
+    bet_fraction = kelly_fraction * 0.5  # Use half-Kelly for safety
+    position_value = portfolio['balance'] * bet_fraction
+    # If Kelly fails or is tiny, fallback to default:
+    if position_value < portfolio['balance'] * 0.02:
+        position_value = portfolio['balance'] * trade_params.get('position_size', 0.05)
     leverage = trade_params['leverage']
     notional_value = position_value * leverage
     
@@ -1431,6 +1468,65 @@ def get_learning_insights():
     
     conn.close()
     return insights
+
+def get_recent_winrate_and_rr(window=50):
+    conn = sqlite3.connect('trading_bot.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT pnl, pnl_percent, stop_loss, take_profit FROM trades WHERE pnl IS NOT NULL AND stop_loss IS NOT NULL AND take_profit IS NOT NULL ORDER BY timestamp DESC LIMIT ?', (window,))
+    trades = cursor.fetchall()
+    conn.close()
+    if not trades or len(trades) < 5:
+        return 0.5, 2.0  # Default: 50% win, 2R
+    wins = [t for t in trades if t[0] > 0]
+    winrate = len(wins)/len(trades)
+    rrs = [abs((t[3]-t[2])/(t[2]-t[3])) if (t[3]!=t[2]) else 2.0 for t in trades]
+    avg_rr = sum(rrs)/len(rrs)
+    return winrate, avg_rr
+
+def auto_tune_hyperparameters(window=50):
+    """Auto-tune ATR multipliers and confidence threshold using last N trades"""
+    conn = sqlite3.connect('trading_bot.db')
+    cursor = conn.cursor()
+    # Get last N trades
+    cursor.execute('''
+        SELECT stop_loss, take_profit, pnl_percent, confidence
+        FROM trades
+        WHERE stop_loss IS NOT NULL AND take_profit IS NOT NULL AND pnl_percent IS NOT NULL
+        ORDER BY timestamp DESC
+        LIMIT ?
+    ''', (window,))
+    rows = cursor.fetchall()
+    conn.close()
+    if not rows:
+        return  # Not enough data
+
+    # Try different ATR multipliers and confidence levels, find best Sharpe ratio
+    best_score = -9999
+    best_params = {}
+    for sl_mult in [1.0, 1.2, 1.5, 1.8, 2.0]:
+        for tp_mult in [1.5, 2.0, 2.5, 3.0, 4.0]:
+            for conf in [5, 6, 7, 8]:
+                # Simulate "filter" over history
+                filtered = [row for row in rows if row[3] >= conf]
+                if len(filtered) < 10: continue
+                rr = [(row[1]-row[0])/abs(row[0]-row[1]) for row in filtered]  # simple R/R check
+                profits = [row[2] for row in filtered]
+                if len(profits) < 2: continue
+                mean = sum(profits)/len(profits)
+                std = statistics.stdev(profits)
+                score = mean/std if std > 0 else mean
+                # Score must penalize too few trades:
+                score -= 0.05 * (20 - len(filtered)) if len(filtered) < 20 else 0
+                if score > best_score:
+                    best_score = score
+                    best_params = {'sl_mult': sl_mult, 'tp_mult': tp_mult, 'conf': conf}
+
+    # Save best found params to database
+    if best_params:
+        set_hyperparameter('sl_multiplier', best_params['sl_mult'])
+        set_hyperparameter('tp_multiplier', best_params['tp_mult'])
+        set_hyperparameter('min_confidence', best_params['conf'])
+        print(f"\n🔧 Auto-tuned params: SL x{best_params['sl_mult']} | TP x{best_params['tp_mult']} | MinConf {best_params['conf']} | Sharpe {best_score:.2f}")
 
 def calculate_portfolio_value(market_data):
     """Calculate total portfolio value"""
@@ -1685,7 +1781,7 @@ def run_enhanced_bot():
                             trade_params = ai_trade_decision(coin, market_data, multi_tf_data, learning_insights)
                             
                             if trade_params and trade_params['direction'] != 'SKIP':
-                                if trade_params['confidence'] >= MIN_CONFIDENCE_THRESHOLD:
+                                if trade_params['confidence'] >= get_hyperparameter('min_confidence', 6):
                                     # Additional risk/reward check
                                     risk_reward = trade_params.get('tp_percentage', 0) / trade_params.get('sl_percentage', 1)
                                     
@@ -1752,6 +1848,9 @@ def run_enhanced_bot():
                 print(f"   Weekly Projection: ${costs['projections']['weekly']['total']:.2f}")
                 print(f"   Monthly Projection: ${costs['projections']['monthly']['total']:.2f}")
                 print(f"   Net Profit (after costs): ${pnl - costs['current']['total']:.2f}")
+
+                if full_analyses_count % 5 == 0:  # every 5 full analyses
+                    auto_tune_hyperparameters(window=50)
                 
                 last_full_analysis = current_time
                 print("="*80)
