@@ -2134,7 +2134,7 @@ def run_enhanced_bot():
                 
                 # Portfolio performance summary with enhanced metrics
                 total_value = calculate_portfolio_value(market_data)
-                pnl = total_value - 1000
+                pnl = total_value - 45.57
                 pnl_pct = (pnl / 1000) * 100
                 
                 # Calculate Sharpe ratio (simplified)
