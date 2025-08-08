@@ -1375,6 +1375,98 @@ def place_real_order(symbol, side, quantity, leverage):
     except Exception as e:
         print(f"Error placing order: {e}")
         return None
+    
+def get_portfolio_stats():
+    """Get comprehensive portfolio statistics from database"""
+    conn = sqlite3.connect('trading_bot.db')
+    cursor = conn.cursor()
+    
+    # Get initial balance from tracking table
+    cursor.execute('SELECT initial_balance FROM portfolio_tracking LIMIT 1')
+    initial_result = cursor.fetchone()
+    initial_balance = initial_result[0] if initial_result else 1000.0
+    
+    # Calculate total P&L from all closed trades
+    cursor.execute('''
+        SELECT 
+            COALESCE(SUM(pnl), 0) as total_pnl,
+            COUNT(CASE WHEN pnl IS NOT NULL THEN 1 END) as total_trades,
+            COUNT(CASE WHEN pnl > 0 THEN 1 END) as winning_trades
+        FROM trades 
+        WHERE action LIKE "%CLOSE"
+    ''')
+    
+    stats = cursor.fetchone()
+    total_pnl = stats[0] if stats[0] is not None else 0.0
+    total_closed_trades = stats[1] if stats[1] is not None else 0
+    winning_trades = stats[2] if stats[2] is not None else 0
+    
+    # Calculate win rate
+    win_rate = (winning_trades / total_closed_trades * 100) if total_closed_trades > 0 else 0
+    
+    # Get current balance
+    current_balance = get_real_balance() if USE_REAL_TRADING else portfolio['balance']
+    
+    # Get all trades for history (last 100)
+    cursor.execute('''
+        SELECT timestamp, position_id, coin, action, direction, price, 
+               position_size, leverage, notional_value, stop_loss, take_profit, 
+               pnl, pnl_percent, reason, confidence
+        FROM trades 
+        ORDER BY timestamp DESC 
+        LIMIT 100
+    ''')
+    
+    trade_history = []
+    for row in cursor.fetchall():
+        trade_history.append({
+            'time': row[0],
+            'position_id': row[1],
+            'coin': row[2],
+            'action': row[3],
+            'direction': row[4],
+            'price': row[5],
+            'position_size': row[6],
+            'leverage': row[7],
+            'notional_value': row[8],
+            'stop_loss': row[9],
+            'take_profit': row[10],
+            'pnl': row[11],
+            'pnl_percent': row[12],
+            'reason': row[13],
+            'confidence': row[14]
+        })
+    
+    conn.close()
+    
+    return {
+        'initial_balance': initial_balance,
+        'current_balance': current_balance,
+        'total_pnl': total_pnl,
+        'total_pnl_percent': (total_pnl / initial_balance * 100) if initial_balance > 0 else 0,
+        'win_rate': win_rate,
+        'total_trades': total_closed_trades,
+        'winning_trades': winning_trades,
+        'trade_history': trade_history
+    }
+
+def get_position_pnl(position, current_price):
+    """Calculate current P&L for a position"""
+    entry_price = position['entry_price']
+    direction = position['direction']
+    
+    if direction == 'LONG':
+        pnl_percent = (current_price - entry_price) / entry_price
+    else:
+        pnl_percent = (entry_price - current_price) / entry_price
+    
+    pnl_amount = pnl_percent * position['notional_value']
+    
+    return {
+        'pnl_amount': pnl_amount,
+        'pnl_percent': pnl_percent * 100
+    }
+
 
 def set_leverage(symbol, leverage):
     """Set leverage for symbol"""
@@ -1637,29 +1729,70 @@ def dashboard_js():
 @app.route('/api/status')
 def api_status():
     try:
-        # Sync balance before sending status
-        if USE_REAL_TRADING:
-            real_balance = get_real_balance()
-            if real_balance != portfolio['balance']:
-                portfolio['balance'] = real_balance
+        # Get comprehensive portfolio stats
+        portfolio_stats = get_portfolio_stats()
         
+        # Get current market data
         current_market_data = get_batch_market_data()
-        total_value = calculate_portfolio_value(current_market_data)
+        
+        # Calculate current position P&L
+        position_pnls = {}
+        total_unrealized_pnl = 0
+        
+        for pos_id, position in portfolio['positions'].items():
+            coin = position['coin']
+            if coin in current_market_data:
+                current_price = current_market_data[coin]['price']
+                pnl_data = get_position_pnl(position, current_price)
+                position_pnls[pos_id] = pnl_data
+                total_unrealized_pnl += pnl_data['pnl_amount']
+        
+        # Enhanced learning insights
         learning_insights = get_learning_insights()
         cost_projections = get_cost_projections()
         
-        # Add trading mode info to response
+        # Calculate final portfolio value
+        final_total_value = portfolio_stats['current_balance'] + total_unrealized_pnl
+        final_total_pnl = portfolio_stats['total_pnl'] + total_unrealized_pnl
+        
         response_data = {
-            'total_value': total_value,
-            'balance': portfolio['balance'],
+            # Portfolio basics
+            'initial_balance': portfolio_stats['initial_balance'],
+            'current_balance': portfolio_stats['current_balance'],
+            'total_value': final_total_value,
+            'total_pnl': final_total_pnl,
+            'total_pnl_percent': (final_total_pnl / portfolio_stats['initial_balance'] * 100),
+            'unrealized_pnl': total_unrealized_pnl,
+            'realized_pnl': portfolio_stats['total_pnl'],
+            
+            # Positions with current P&L
             'positions': portfolio['positions'],
-            'trade_history': portfolio['trade_history'][-20:],
+            'position_pnls': position_pnls,
+            
+            # Complete trade history
+            'trade_history': portfolio_stats['trade_history'],
+            
+            # Market data
             'market_data': current_market_data,
+            
+            # Performance metrics
+            'performance_metrics': {
+                'win_rate': portfolio_stats['win_rate'],
+                'total_trades': portfolio_stats['total_trades'],
+                'avg_trade_size': sum(pos['position_size'] for pos in portfolio['positions'].values()) / len(portfolio['positions']) if portfolio['positions'] else 0,
+                'active_positions': len(portfolio['positions'])
+            },
+            
+            # Learning and cost data
             'learning_metrics': learning_insights,
             'cost_tracking': cost_projections,
+            
+            # System info
             'timestamp': datetime.now().isoformat(),
             'trading_mode': 'REAL' if USE_REAL_TRADING else 'PAPER',
             'real_balance': get_real_balance() if USE_REAL_TRADING else None,
+            
+            # Memory stats
             'memory_stats': {
                 'patterns_learned': len(pattern_learner.patterns),
                 'trade_memories': len(trading_memory.recent_context),
@@ -1672,7 +1805,77 @@ def api_status():
     
     except Exception as e:
         print(f"API Status Error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+    
+def update_portfolio_balance():
+    """Update portfolio balance from real trading or maintain simulated balance"""
+    global portfolio
+    
+    if USE_REAL_TRADING:
+        # Sync with real balance
+        real_balance = get_real_balance()
+        if real_balance != portfolio['balance']:
+            print(f"💰 Balance synced: ${portfolio['balance']:.2f} → ${real_balance:.2f}")
+            portfolio['balance'] = real_balance
+    
+    # Update last sync time
+    portfolio['last_balance_sync'] = datetime.now().isoformat()
+
+def initialize_portfolio_tracking():
+    """Initialize portfolio tracking with proper balance management"""
+    conn = sqlite3.connect('trading_bot.db')
+    cursor = conn.cursor()
+    
+    # Create initial balance tracking table if not exists
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS portfolio_tracking (
+            id INTEGER PRIMARY KEY,
+            initial_balance REAL NOT NULL,
+            initialized_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            trading_mode TEXT NOT NULL
+        )
+    ''')
+    
+    # Check if we have an initial balance recorded
+    cursor.execute('SELECT initial_balance, trading_mode FROM portfolio_tracking LIMIT 1')
+    existing = cursor.fetchone()
+    
+    if not existing:
+        # Record initial balance
+        if USE_REAL_TRADING:
+            initial_balance = get_real_balance()
+            trading_mode = 'REAL'
+            print(f"🔴 REAL TRADING: Initial balance recorded as ${initial_balance:.2f}")
+        else:
+            initial_balance = portfolio['balance']
+            trading_mode = 'PAPER'
+            print(f"📝 PAPER TRADING: Initial balance recorded as ${initial_balance:.2f}")
+        
+        cursor.execute('''
+            INSERT INTO portfolio_tracking (initial_balance, trading_mode)
+            VALUES (?, ?)
+        ''', (initial_balance, trading_mode))
+        
+        portfolio['initial_balance'] = initial_balance
+    else:
+        portfolio['initial_balance'] = existing[0]
+        print(f"📊 Loaded existing initial balance: ${existing[0]:.2f} ({existing[1]} mode)")
+    
+    conn.commit()
+    conn.close()
+
+def sync_portfolio_data():
+    """Comprehensive portfolio data synchronization"""
+    update_portfolio_balance()
+    
+    # Load any missed positions from database
+    db_positions = load_active_positions()
+    for pos_id, pos_data in db_positions.items():
+        if pos_id not in portfolio['positions']:
+            portfolio['positions'][pos_id] = pos_data
+            print(f"📊 Loaded missing position: {pos_data['coin']} {pos_data['direction']}")
 
 
 def run_flask_app():
@@ -3118,8 +3321,9 @@ def run_enhanced_bot():
     """Main bot loop with memory and external data"""
     # Initialize
     init_database()
+    initialize_portfolio_tracking()  # ADD THIS LINE
     portfolio['positions'] = load_active_positions()
-    sync_real_balance()
+    sync_portfolio_data()
     
     print("🚀 SUPER SMART TRADING BOT - MEMORY & EXTERNAL DATA MODE")
     print("🧠 Memory Systems:")
@@ -3165,8 +3369,7 @@ def run_enhanced_bot():
             current_time = time.time()
 
             if current_time - last_balance_sync >= 300:  # 5 minutes
-                if USE_REAL_TRADING:
-                    sync_real_balance()
+                sync_portfolio_data()
                 last_balance_sync = current_time
             
             # ========== QUICK CHECK MODE (Every 15 seconds) ==========

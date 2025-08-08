@@ -1,5 +1,6 @@
 let portfolioChart = null;
 let performanceChart = null;
+let portfolioHistory = []; // Track portfolio value over time
 
 // Initialize dashboard
 document.addEventListener("DOMContentLoaded", function () {
@@ -7,7 +8,7 @@ document.addEventListener("DOMContentLoaded", function () {
   initPerformanceChart();
   fetchData();
 
-  // Update every 15 seconds (more frequent for better real-time feel)
+  // Update every 15 seconds
   setInterval(fetchData, 15000);
 });
 
@@ -19,7 +20,7 @@ function initPortfolioChart() {
       labels: ["Cash"],
       datasets: [
         {
-          data: [45.57],
+          data: [100],
           backgroundColor: ["#60a5fa"],
           borderWidth: 0,
         },
@@ -113,14 +114,18 @@ async function fetchData() {
 
     updateSummaryCards(data);
     updateMarketData(data.market_data);
-    updateLeveragePositions(data.positions, data.market_data);
+    updateLeveragePositions(
+      data.positions,
+      data.market_data,
+      data.position_pnls
+    );
     updateLeverageTradeHistory(data.trade_history);
     updatePortfolioChart(data);
     updatePerformanceChart(data);
     updateLearningMetrics(data.learning_metrics);
     updateCostTracking(data.cost_tracking);
     updateMarketRegimes(data.positions, data.market_data);
-    updateTradingModeIndicator(data); // NEW
+    updateTradingModeIndicator(data);
 
     // Store for global use
     window.data = data;
@@ -136,14 +141,12 @@ async function fetchData() {
 }
 
 function updateTradingModeIndicator(data) {
-  // Update the header to show trading mode
   const header = document.querySelector("h1");
   const tradingMode = data.trading_mode || "PAPER";
   const modeColor = tradingMode === "REAL" ? "text-red-400" : "text-blue-400";
   const modeIcon =
     tradingMode === "REAL" ? "fas fa-exclamation-triangle" : "fas fa-file-alt";
 
-  // Add trading mode indicator if not exists
   let modeIndicator = document.getElementById("trading-mode-indicator");
   if (!modeIndicator) {
     modeIndicator = document.createElement("span");
@@ -157,35 +160,44 @@ function updateTradingModeIndicator(data) {
 }
 
 function updateSummaryCards(data) {
-  // Use real balance from API response
-  const currentBalance = data.balance || 45.57;
+  // Use dynamic data from API
+  const initialBalance = data.initial_balance || 1000;
+  const currentBalance = data.current_balance || initialBalance;
   const totalValue = data.total_value || currentBalance;
+  const totalPnl = data.total_pnl || 0;
+  const totalPnlPercent = data.total_pnl_percent || 0;
+  const realizedPnl = data.realized_pnl || 0;
+  const unrealizedPnl = data.unrealized_pnl || 0;
 
-  // Calculate PnL based on starting balance (you may want to track this differently)
-  const startingBalance = 45.57; // You might want to store this in the database
-  const pnl = totalValue - startingBalance;
-  const pnlPercent = (pnl / startingBalance) * 100;
-
+  // Update total value
   document.getElementById("total-value").textContent = `$${totalValue.toFixed(
     2
   )}`;
 
+  // Update P&L with breakdown
   const pnlElement = document.getElementById("total-pnl");
   pnlElement.innerHTML = `
-    $${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+    $${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}
     <span class="text-xs font-normal opacity-75">(${
-      pnlPercent >= 0 ? "+" : ""
-    }${pnlPercent.toFixed(1)}%)</span>
+      totalPnlPercent >= 0 ? "+" : ""
+    }${totalPnlPercent.toFixed(1)}%)</span>
   `;
   pnlElement.className = `text-xl font-bold ${
-    pnl >= 0 ? "text-green-400" : "text-red-400"
+    totalPnl >= 0 ? "text-green-400" : "text-red-400"
   }`;
 
+  // Add P&L breakdown tooltip/details
+  pnlElement.title = `Realized: $${realizedPnl.toFixed(
+    2
+  )} | Unrealized: $${unrealizedPnl.toFixed(2)}`;
+
+  // Update positions and trades count
   document.getElementById("active-positions").textContent = Object.keys(
-    data.positions
+    data.positions || {}
   ).length;
+
   document.getElementById("total-trades").textContent =
-    data.trade_history.length;
+    data.performance_metrics?.total_trades || 0;
 
   // Show real balance information if available
   if (data.real_balance && data.trading_mode === "REAL") {
@@ -193,7 +205,6 @@ function updateSummaryCards(data) {
       .querySelector("#total-value")
       .closest(".compact-card");
 
-    // Add real balance indicator
     let realBalanceIndicator = balanceCard.querySelector(
       ".real-balance-indicator"
     );
@@ -207,10 +218,36 @@ function updateSummaryCards(data) {
       2
     )}`;
   }
+
+  // Update balance breakdown in portfolio card
+  const portfolioCard = document
+    .querySelector("#total-value")
+    .closest(".compact-card");
+  let balanceBreakdown = portfolioCard.querySelector(".balance-breakdown");
+  if (!balanceBreakdown) {
+    balanceBreakdown = document.createElement("div");
+    balanceBreakdown.className = "balance-breakdown text-xs text-gray-400 mt-1";
+    portfolioCard.querySelector("div > div").appendChild(balanceBreakdown);
+  }
+
+  const cashPercent =
+    totalValue > 0 ? (currentBalance / totalValue) * 100 : 100;
+  const positionsValue = totalValue - currentBalance;
+  const positionsPercent = 100 - cashPercent;
+
+  balanceBreakdown.innerHTML = `
+    Cash: $${currentBalance.toFixed(2)} (${cashPercent.toFixed(1)}%)
+    ${
+      positionsValue > 0
+        ? `<br>Positions: $${positionsValue.toFixed(
+            2
+          )} (${positionsPercent.toFixed(1)}%)`
+        : ""
+    }
+  `;
 }
 
 function updateMarketRegimes(positions, marketData) {
-  // Create market regimes section if not exists
   let regimeContainer = document.getElementById("market-regimes");
   if (!regimeContainer) {
     const marketSection = document.getElementById("market-data-section");
@@ -222,7 +259,6 @@ function updateMarketRegimes(positions, marketData) {
           <i class="fas fa-brain mr-2"></i>Market Regimes
         </h3>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-2" id="market-regimes">
-          <!-- Regimes will be populated here -->
         </div>
       </div>
     `;
@@ -230,9 +266,8 @@ function updateMarketRegimes(positions, marketData) {
     regimeContainer = document.getElementById("market-regimes");
   }
 
-  // Count positions by regime
   const regimeCounts = {};
-  Object.values(positions).forEach((pos) => {
+  Object.values(positions || {}).forEach((pos) => {
     const regime = pos.market_regime || "UNKNOWN";
     regimeCounts[regime] = (regimeCounts[regime] || 0) + 1;
   });
@@ -270,13 +305,15 @@ function updateMarketRegimes(positions, marketData) {
 
   if (regimeHTML) {
     regimeContainer.innerHTML = regimeHTML;
+  } else {
+    regimeContainer.innerHTML =
+      '<p class="text-gray-400 text-sm col-span-full text-center">No active positions</p>';
   }
 }
 
 function updateCostTracking(costData) {
   if (!costData) return;
 
-  // Check if cost tracking section already exists
   let costSection = document.getElementById("cost-tracking-section");
   if (!costSection) {
     const mainContainer = document.querySelector(".container");
@@ -287,19 +324,15 @@ function updateCostTracking(costData) {
             <i class="fas fa-dollar-sign mr-2"></i>Service Costs & Projections
           </h2>
           
-          <!-- Current Costs -->
           <div class="mb-6">
             <h3 class="text-base font-semibold text-gray-300 mb-3">Current Session</h3>
             <div class="grid grid-cols-2 md:grid-cols-5 gap-3" id="current-costs">
-              <!-- Current costs here -->
             </div>
           </div>
           
-          <!-- Cost Projections -->
           <div>
             <h3 class="text-base font-semibold text-gray-300 mb-3">Projected Costs</h3>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-3" id="cost-projections">
-              <!-- Projections here -->
             </div>
           </div>
         </div>
@@ -314,32 +347,33 @@ function updateCostTracking(costData) {
     }
   }
 
-  // Update current costs
   const currentCosts = document.getElementById("current-costs");
   if (currentCosts) {
-    const totalValue = window.data?.total_value || 45.57;
-    const netProfit = totalValue - 45.57 - costData.current.total;
+    const totalValue = window.data?.total_value || 0;
+    const initialBalance = window.data?.initial_balance || 1000;
+    const totalPnl = window.data?.total_pnl || 0;
+    const netProfit = totalPnl - (costData.current?.total || 0);
 
     currentCosts.innerHTML = `
       <div class="text-center bg-gray-700/30 rounded-lg p-3">
         <p class="text-lg font-bold text-blue-400">$${
-          costData.current.openai?.toFixed(4) || "0.0000"
+          costData.current?.openai?.toFixed(4) || "0.0000"
         }</p>
         <p class="text-gray-400 text-xs">OpenAI</p>
         <p class="text-xs text-gray-500">${
-          costData.current.api_calls || 0
+          costData.current?.api_calls || 0
         } calls</p>
       </div>
       <div class="text-center bg-gray-700/30 rounded-lg p-3">
         <p class="text-lg font-bold text-purple-400">$${
-          costData.current.railway?.toFixed(4) || "0.0000"
+          costData.current?.railway?.toFixed(4) || "0.0000"
         }</p>
         <p class="text-gray-400 text-xs">Railway</p>
         <p class="text-xs text-gray-500">Hosting</p>
       </div>
       <div class="text-center bg-gray-700/30 rounded-lg p-3">
         <p class="text-lg font-bold text-yellow-400">$${
-          costData.current.total?.toFixed(4) || "0.0000"
+          costData.current?.total?.toFixed(4) || "0.0000"
         }</p>
         <p class="text-gray-400 text-xs">Total Cost</p>
         <p class="text-xs text-gray-500">All services</p>
@@ -356,9 +390,11 @@ function updateCostTracking(costData) {
       <div class="text-center bg-gray-700/30 rounded-lg p-3">
         <p class="text-lg font-bold text-cyan-400">
           ${
-            costData.current.total > 0
-              ? ((totalValue - 45.57) / costData.current.total).toFixed(1)
-              : "∞"
+            costData.current?.total > 0 && totalPnl > 0
+              ? (totalPnl / costData.current.total).toFixed(1)
+              : totalPnl > 0
+              ? "∞"
+              : "0"
           }x
         </p>
         <p class="text-gray-400 text-xs">ROI</p>
@@ -367,7 +403,6 @@ function updateCostTracking(costData) {
     `;
   }
 
-  // Update projections
   const projections = document.getElementById("cost-projections");
   if (projections && costData.projections) {
     projections.innerHTML = `
@@ -375,13 +410,13 @@ function updateCostTracking(costData) {
         <h4 class="text-sm font-semibold text-gray-300 mb-2">Weekly Estimate</h4>
         <div class="space-y-1">
           <p class="text-xl font-bold text-white">$${
-            costData.projections.weekly.total?.toFixed(2) || "0.00"
+            costData.projections.weekly?.total?.toFixed(2) || "0.00"
           }</p>
           <p class="text-xs text-gray-300">OpenAI: $${
-            costData.projections.weekly.openai?.toFixed(2) || "0.00"
+            costData.projections.weekly?.openai?.toFixed(2) || "0.00"
           }</p>
           <p class="text-xs text-gray-300">Railway: $${
-            costData.projections.weekly.railway?.toFixed(2) || "0.00"
+            costData.projections.weekly?.railway?.toFixed(2) || "0.00"
           }</p>
         </div>
       </div>
@@ -390,13 +425,13 @@ function updateCostTracking(costData) {
         <h4 class="text-sm font-semibold text-gray-300 mb-2">Monthly Estimate</h4>
         <div class="space-y-1">
           <p class="text-xl font-bold text-white">$${
-            costData.projections.monthly.total?.toFixed(2) || "0.00"
+            costData.projections.monthly?.total?.toFixed(2) || "0.00"
           }</p>
           <p class="text-xs text-gray-300">OpenAI: $${
-            costData.projections.monthly.openai?.toFixed(2) || "0.00"
+            costData.projections.monthly?.openai?.toFixed(2) || "0.00"
           }</p>
           <p class="text-xs text-gray-300">Railway: $${
-            costData.projections.monthly.railway?.toFixed(2) || "0.00"
+            costData.projections.monthly?.railway?.toFixed(2) || "0.00"
           }</p>
         </div>
       </div>
@@ -406,13 +441,14 @@ function updateCostTracking(costData) {
         <div class="space-y-1">
           <p class="text-xl font-bold text-white">
             $${(
-              costData.current.total / (costData.current.api_calls || 1)
+              (costData.current?.total || 0) /
+              (costData.current?.api_calls || 1)
             ).toFixed(4)}
           </p>
           <p class="text-xs text-gray-300">Per API Call</p>
           <p class="text-xs text-gray-300 mt-2">
             ${
-              costData.current.api_calls
+              costData.current?.api_calls
                 ? (costData.current.api_calls / 24).toFixed(1)
                 : "0"
             } calls/hour avg
@@ -427,8 +463,7 @@ function updateMarketData(marketData) {
   const container = document.getElementById("market-data");
   container.innerHTML = "";
 
-  // Sort by 24h change for better visibility
-  const sortedCoins = Object.entries(marketData).sort(
+  const sortedCoins = Object.entries(marketData || {}).sort(
     (a, b) => b[1].change_24h - a[1].change_24h
   );
 
@@ -437,7 +472,6 @@ function updateMarketData(marketData) {
       data.change_24h >= 0 ? "text-green-400" : "text-red-400";
     const changeIcon = data.change_24h >= 0 ? "fa-arrow-up" : "fa-arrow-down";
 
-    // Volume indicator based on quote volume
     const volumeIndicator =
       data.quote_volume > 100000000
         ? "🔥"
@@ -473,10 +507,10 @@ function updateMarketData(marketData) {
   });
 }
 
-function updateLeveragePositions(positions, marketData) {
+function updateLeveragePositions(positions, marketData, positionPnls) {
   const tbody = document.getElementById("positions-body");
 
-  if (Object.keys(positions).length === 0) {
+  if (!positions || Object.keys(positions).length === 0) {
     tbody.innerHTML = `
       <tr>
         <td colspan="10" class="text-center py-12 text-gray-400">
@@ -499,17 +533,25 @@ function updateLeveragePositions(positions, marketData) {
     const direction = position.direction;
     const leverage = position.leverage;
 
-    let pnlPercent;
-    if (direction === "LONG") {
-      pnlPercent = (currentPrice - entryPrice) / entryPrice;
-    } else {
-      pnlPercent = (entryPrice - currentPrice) / entryPrice;
+    // Use API-provided P&L if available, otherwise calculate
+    let pnlData = positionPnls?.[positionId];
+    if (!pnlData) {
+      let pnlPercent;
+      if (direction === "LONG") {
+        pnlPercent = (currentPrice - entryPrice) / entryPrice;
+      } else {
+        pnlPercent = (entryPrice - currentPrice) / entryPrice;
+      }
+      pnlData = {
+        pnl_amount: pnlPercent * position.notional_value,
+        pnl_percent: pnlPercent * 100,
+      };
     }
 
-    const pnlAmount = pnlPercent * position.notional_value;
     const duration = calculateDuration(position.entry_time);
 
-    const pnlColor = pnlAmount >= 0 ? "text-green-400" : "text-red-400";
+    const pnlColor =
+      pnlData.pnl_amount >= 0 ? "text-green-400" : "text-red-400";
     const directionColor =
       direction === "LONG" ? "text-green-400" : "text-red-400";
     const directionIcon =
@@ -526,7 +568,6 @@ function updateLeveragePositions(positions, marketData) {
         ? ((position.take_profit - currentPrice) / currentPrice) * 100
         : ((currentPrice - position.take_profit) / currentPrice) * 100;
 
-    // Market regime icon
     const regimeIcons = {
       TRENDING_UP: "🚀",
       TRENDING_DOWN: "📉",
@@ -555,10 +596,10 @@ function updateLeveragePositions(positions, marketData) {
         <td class="py-3 px-3 font-mono text-sm">$${entryPrice.toLocaleString()}</td>
         <td class="py-3 px-3 font-mono text-sm">$${currentPrice.toLocaleString()}</td>
         <td class="py-3 px-3 ${pnlColor} font-semibold">
-          $${pnlAmount >= 0 ? "+" : ""}${pnlAmount.toFixed(2)}
-          <br><span class="text-sm">(${pnlPercent >= 0 ? "+" : ""}${(
-      pnlPercent * 100
-    ).toFixed(1)}%)</span>
+          $${pnlData.pnl_amount >= 0 ? "+" : ""}${pnlData.pnl_amount.toFixed(2)}
+          <br><span class="text-sm">(${
+            pnlData.pnl_percent >= 0 ? "+" : ""
+          }${pnlData.pnl_percent.toFixed(1)}%)</span>
         </td>
         <td class="py-3 px-3 text-sm">${duration}</td>
         <td class="py-3 px-3">
@@ -597,7 +638,7 @@ function updateLeveragePositions(positions, marketData) {
 function updateLeverageTradeHistory(tradeHistory) {
   const tbody = document.getElementById("trades-body");
 
-  if (tradeHistory.length === 0) {
+  if (!tradeHistory || tradeHistory.length === 0) {
     tbody.innerHTML = `
       <tr>
         <td colspan="8" class="text-center py-12 text-gray-400">
@@ -613,9 +654,9 @@ function updateLeverageTradeHistory(tradeHistory) {
 
   tbody.innerHTML = "";
 
-  // Show last 10 trades
+  // Show last 20 trades, most recent first
   tradeHistory
-    .slice(-10)
+    .slice(-20)
     .reverse()
     .forEach((trade) => {
       const isClose = trade.action?.includes("CLOSE");
@@ -639,7 +680,7 @@ function updateLeverageTradeHistory(tradeHistory) {
         }
       }
 
-      // Risk/Reward calculation if available
+      // Risk/Reward calculation
       let rrCell = "-";
       if (trade.stop_loss && trade.take_profit && trade.price && !isClose) {
         const slRisk = Math.abs(trade.price - trade.stop_loss) / trade.price;
@@ -649,18 +690,39 @@ function updateLeverageTradeHistory(tradeHistory) {
         rrCell = `<span class="text-xs text-gray-400 bg-gray-700/30 px-2 py-1 rounded-full">1:${rr.toFixed(
           1
         )}</span>`;
+      } else if (isClose && trade.pnl && trade.position_size) {
+        // For closed trades, show actual R:R achieved
+        const returnPercent = Math.abs(trade.pnl_percent || 0);
+        rrCell = `<span class="text-xs ${
+          trade.pnl >= 0 ? "text-green-400" : "text-red-400"
+        } bg-gray-700/30 px-2 py-1 rounded-full">${returnPercent.toFixed(
+          1
+        )}%</span>`;
       }
+
+      const tradeTime = new Date(trade.time);
+      const timeString = tradeTime.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      const dateString = tradeTime.toLocaleDateString();
 
       tbody.innerHTML += `
       <tr class="border-b border-gray-700/30 hover:bg-gray-800/30 transition-colors">
-        <td class="py-3 px-3 text-sm font-mono">${new Date(
-          trade.time
-        ).toLocaleTimeString()}</td>
+        <td class="py-3 px-3 text-sm font-mono">
+          ${timeString}
+          <br><span class="text-xs text-gray-500">${dateString}</span>
+        </td>
         <td class="py-3 px-3 font-semibold">${trade.coin}</td>
         <td class="py-3 px-3 ${actionColor}">
           <span class="flex items-center">
             <i class="fas ${actionIcon} mr-1"></i>${trade.action || "-"}
           </span>
+          ${
+            trade.leverage
+              ? `<br><span class="text-xs text-gray-400">${trade.leverage}x</span>`
+              : ""
+          }
         </td>
         <td class="py-3 px-3 font-mono text-sm">$${
           trade.price?.toLocaleString() || "-"
@@ -681,7 +743,6 @@ function updateLeverageTradeHistory(tradeHistory) {
 }
 
 function updateLearningMetrics(metrics) {
-  // Check if learning metrics section already exists
   let metricsSection = document.getElementById("learning-metrics-section");
   if (!metricsSection) {
     const mainContainer = document.querySelector(".container");
@@ -692,10 +753,8 @@ function updateLearningMetrics(metrics) {
             <i class="fas fa-brain mr-2"></i>AI Learning Metrics
           </h2>
           <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4" id="learning-metrics">
-            <!-- Metrics will be populated here -->
           </div>
           <div id="regime-performance">
-            <!-- Regime performance will be populated here -->
           </div>
         </div>
       </div>
@@ -705,7 +764,6 @@ function updateLearningMetrics(metrics) {
 
   const metricsContainer = document.getElementById("learning-metrics");
   if (metrics && metricsContainer) {
-    // Calculate Sharpe ratio if we have trade history
     let sharpeRatio = 0;
     if (
       window.data &&
@@ -767,7 +825,6 @@ function updateLearningMetrics(metrics) {
       </div>
     `;
 
-    // Show regime performance if available
     if (
       metrics.regime_performance &&
       Object.keys(metrics.regime_performance).length > 0
@@ -801,9 +858,9 @@ function updateLearningMetrics(metrics) {
 function updatePortfolioChart(data) {
   if (!portfolioChart) return;
 
-  const positions = Object.values(data.positions);
+  const positions = Object.values(data.positions || {});
   const labels = ["Cash"];
-  const values = [data.balance];
+  const values = [data.current_balance || 0];
   const colors = ["#60a5fa"];
 
   positions.forEach((position, index) => {
@@ -821,17 +878,24 @@ function updatePortfolioChart(data) {
 function updatePerformanceChart(data) {
   if (!performanceChart) return;
 
-  // Update with latest portfolio value
   const currentTime = new Date().toLocaleTimeString();
+  const currentValue = data.total_value || 0;
 
-  // Keep only last 20 data points
-  if (performanceChart.data.labels.length >= 20) {
-    performanceChart.data.labels.shift();
-    performanceChart.data.datasets[0].data.shift();
+  // Add to history
+  portfolioHistory.push({
+    time: currentTime,
+    value: currentValue,
+    timestamp: Date.now(),
+  });
+
+  // Keep only last 50 data points
+  if (portfolioHistory.length > 50) {
+    portfolioHistory = portfolioHistory.slice(-50);
   }
 
-  performanceChart.data.labels.push(currentTime);
-  performanceChart.data.datasets[0].data.push(data.total_value);
+  // Update chart with historical data
+  performanceChart.data.labels = portfolioHistory.map((h) => h.time);
+  performanceChart.data.datasets[0].data = portfolioHistory.map((h) => h.value);
   performanceChart.update();
 }
 
