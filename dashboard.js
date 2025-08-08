@@ -120,11 +120,12 @@ async function fetchData() {
     updateLearningMetrics(data.learning_metrics);
     updateCostTracking(data.cost_tracking);
     updateMarketRegimes(data.positions, data.market_data);
+    updateTradingModeIndicator(data); // NEW
 
     // Store for global use
     window.data = data;
 
-    // Update connection status with modern styling
+    // Update connection status
     document.querySelector(".connection-status").innerHTML =
       '<span class="status-dot status-live pulse"></span><span class="text-green-400 font-medium">LIVE</span>';
   } catch (error) {
@@ -134,14 +135,42 @@ async function fetchData() {
   }
 }
 
+function updateTradingModeIndicator(data) {
+  // Update the header to show trading mode
+  const header = document.querySelector("h1");
+  const tradingMode = data.trading_mode || "PAPER";
+  const modeColor = tradingMode === "REAL" ? "text-red-400" : "text-blue-400";
+  const modeIcon =
+    tradingMode === "REAL" ? "fas fa-exclamation-triangle" : "fas fa-file-alt";
+
+  // Add trading mode indicator if not exists
+  let modeIndicator = document.getElementById("trading-mode-indicator");
+  if (!modeIndicator) {
+    modeIndicator = document.createElement("span");
+    modeIndicator.id = "trading-mode-indicator";
+    modeIndicator.className = `ml-3 text-sm font-bold ${modeColor}`;
+    header.appendChild(modeIndicator);
+  }
+
+  modeIndicator.innerHTML = `<i class="${modeIcon} mr-1"></i>${tradingMode} MODE`;
+  modeIndicator.className = `ml-3 text-sm font-bold ${modeColor}`;
+}
+
 function updateSummaryCards(data) {
-  document.getElementById(
-    "total-value"
-  ).textContent = `$${data.total_value.toFixed(2)}`;
+  // Use real balance from API response
+  const currentBalance = data.balance || 1000;
+  const totalValue = data.total_value || currentBalance;
+
+  // Calculate PnL based on starting balance (you may want to track this differently)
+  const startingBalance = 1000; // You might want to store this in the database
+  const pnl = totalValue - startingBalance;
+  const pnlPercent = (pnl / startingBalance) * 100;
+
+  document.getElementById("total-value").textContent = `$${totalValue.toFixed(
+    2
+  )}`;
 
   const pnlElement = document.getElementById("total-pnl");
-  const pnl = data.total_value - 1000;
-  const pnlPercent = (pnl / 1000) * 100;
   pnlElement.innerHTML = `
     $${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
     <span class="text-xs font-normal opacity-75">(${
@@ -157,6 +186,27 @@ function updateSummaryCards(data) {
   ).length;
   document.getElementById("total-trades").textContent =
     data.trade_history.length;
+
+  // Show real balance information if available
+  if (data.real_balance && data.trading_mode === "REAL") {
+    const balanceCard = document
+      .querySelector("#total-value")
+      .closest(".compact-card");
+
+    // Add real balance indicator
+    let realBalanceIndicator = balanceCard.querySelector(
+      ".real-balance-indicator"
+    );
+    if (!realBalanceIndicator) {
+      realBalanceIndicator = document.createElement("div");
+      realBalanceIndicator.className =
+        "real-balance-indicator text-xs text-green-400 mt-1";
+      balanceCard.querySelector("div > div").appendChild(realBalanceIndicator);
+    }
+    realBalanceIndicator.innerHTML = `🔴 Live: $${data.real_balance.toFixed(
+      2
+    )}`;
+  }
 }
 
 function updateMarketRegimes(positions, marketData) {

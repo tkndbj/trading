@@ -17,6 +17,7 @@ import urllib.parse
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
 
+
 # Cost tracking with projections
 cost_tracker = {
     'openai_tokens': 0,
@@ -37,6 +38,14 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY") 
 FUTURES_BASE_URL = "https://fapi.binance.com"
 USE_REAL_TRADING = True
+
+if USE_REAL_TRADING:
+    if not BINANCE_API_KEY or not BINANCE_SECRET_KEY:
+        print("❌ ERROR: Real trading enabled but API keys not found!")
+        print("Set BINANCE_API_KEY and BINANCE_SECRET_KEY environment variables")
+        exit(1)
+    else:
+        print(f"✅ Real trading enabled with API key: {BINANCE_API_KEY[:8]}...")
 
 # Enhanced Database setup
 def init_database():
@@ -181,11 +190,12 @@ def generate_signature(params, secret):
     return hmac.new(secret.encode(), query_string.encode(), hashlib.sha256).hexdigest()
 
 def get_real_balance():
-    """Get real USD balance from Binance Futures (USDT or BNFCR)"""
+    """Get real USD balance from Binance Futures (USDT)"""
     if not USE_REAL_TRADING or not BINANCE_API_KEY:
         return portfolio['balance']
     
     try:
+        # Use correct futures balance endpoint
         endpoint = "/fapi/v2/balance"
         timestamp = int(time.time() * 1000)
         
@@ -194,20 +204,111 @@ def get_real_balance():
         params['signature'] = signature
         
         headers = {'X-MBX-APIKEY': BINANCE_API_KEY}
-        response = requests.get(FUTURES_BASE_URL + endpoint, params=params, headers=headers)
+        response = requests.get(FUTURES_BASE_URL + endpoint, params=params, headers=headers, timeout=10)
+        
+        print(f"Balance API Response Status: {response.status_code}")
         
         if response.status_code == 200:
             balances = response.json()
+            print(f"Raw balance response: {balances}")
+            
             for balance in balances:
-                # Look for USDT, USDC, or BNFCR
-                if balance['asset'] in ['USDT', 'USDC', 'BNFCR']:
-                    balance_value = float(balance['balance'])
-                    if balance_value > 0:  # Return first non-zero balance
-                        return balance_value
-        return portfolio['balance']
+                # Look for USDT balance specifically
+                if balance['asset'] == 'USDT':
+                    available_balance = float(balance['balance'])
+                    wallet_balance = float(balance.get('walletBalance', balance['balance']))
+                    
+                    print(f"USDT Available: ${available_balance:.2f}, Wallet: ${wallet_balance:.2f}")
+                    
+                    # Use wallet balance (total) rather than available balance
+                    if wallet_balance > 0:
+                        return wallet_balance
+                    elif available_balance > 0:
+                        return available_balance
+            
+            print("No USDT balance found in futures account")
+            return portfolio['balance']
+        else:
+            print(f"Balance API Error: {response.status_code} - {response.text}")
+            return portfolio['balance']
+            
     except Exception as e:
         print(f"Error getting real balance: {e}")
         return portfolio['balance']
+    
+def get_account_info():
+    """Get complete Binance Futures account information"""
+    if not USE_REAL_TRADING or not BINANCE_API_KEY:
+        return None
+    
+    try:
+        endpoint = "/fapi/v2/account"
+        timestamp = int(time.time() * 1000)
+        
+        params = {'timestamp': timestamp}
+        signature = generate_signature(params, BINANCE_SECRET_KEY)
+        params['signature'] = signature
+        
+        headers = {'X-MBX-APIKEY': BINANCE_API_KEY}
+        response = requests.get(FUTURES_BASE_URL + endpoint, params=params, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            account_info = response.json()
+            print(f"Account Info - Total Wallet Balance: ${account_info.get('totalWalletBalance', 0)}")
+            print(f"Account Info - Available Balance: ${account_info.get('availableBalance', 0)}")
+            print(f"Account Info - Total Unrealized PnL: ${account_info.get('totalUnrealizedPnL', 0)}")
+            return account_info
+        else:
+            print(f"Account Info Error: {response.status_code} - {response.text}")
+            return None
+            
+    except Exception as e:
+        print(f"Error getting account info: {e}")
+        return None
+    
+def sync_real_balance():
+    """Synchronize portfolio balance with real Binance balance"""
+    if not USE_REAL_TRADING:
+        print("📝 Paper trading mode - using simulated balance")
+        return
+    
+    print("💰 Syncing with Binance Futures account...")
+    
+    # Get detailed account info first
+    account_info = get_account_info()
+    if account_info:
+        total_wallet = float(account_info.get('totalWalletBalance', 0))
+        available_balance = float(account_info.get('availableBalance', 0))
+        unrealized_pnl = float(account_info.get('totalUnrealizedPnL', 0))
+        
+        print(f"   📊 Wallet Balance: ${total_wallet:.2f}")
+        print(f"   💵 Available: ${available_balance:.2f}")
+        print(f"   📈 Unrealized PnL: ${unrealized_pnl:+.2f}")
+        
+        # Update portfolio with real balance
+        portfolio['balance'] = available_balance
+        print(f"   ✅ Portfolio balance updated to: ${available_balance:.2f}")
+        
+        # Check for existing positions
+        existing_positions = account_info.get('positions', [])
+        active_positions = [pos for pos in existing_positions if float(pos.get('positionAmt', 0)) != 0]
+        
+        if active_positions:
+            print(f"   ⚠️  Found {len(active_positions)} existing positions on Binance:")
+            for pos in active_positions:
+                symbol = pos.get('symbol', '')
+                amount = float(pos.get('positionAmt', 0))
+                entry_price = float(pos.get('entryPrice', 0))
+                pnl = float(pos.get('unRealizedPnl', 0))
+                
+                side = "LONG" if amount > 0 else "SHORT"
+                print(f"      • {symbol}: {side} {abs(amount):.4f} @ ${entry_price:.2f} (PnL: ${pnl:+.2f})")
+    else:
+        # Fallback to simple balance check
+        real_balance = get_real_balance()
+        if real_balance != portfolio['balance']:
+            portfolio['balance'] = real_balance
+            print(f"   ✅ Balance updated to: ${real_balance:.2f}")
 
 def place_real_order(symbol, side, quantity, leverage):
     """Place real futures order"""
@@ -502,11 +603,18 @@ def dashboard_js():
 @app.route('/api/status')
 def api_status():
     try:
+        # Sync balance before sending status
+        if USE_REAL_TRADING:
+            real_balance = get_real_balance()
+            if real_balance != portfolio['balance']:
+                portfolio['balance'] = real_balance
+        
         current_market_data = get_batch_market_data()
         total_value = calculate_portfolio_value(current_market_data)
         learning_insights = get_learning_insights()
         cost_projections = get_cost_projections()
         
+        # Add trading mode info to response
         response_data = {
             'total_value': total_value,
             'balance': portfolio['balance'],
@@ -515,13 +623,17 @@ def api_status():
             'market_data': current_market_data,
             'learning_metrics': learning_insights,
             'cost_tracking': cost_projections,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            'trading_mode': 'REAL' if USE_REAL_TRADING else 'PAPER',
+            'real_balance': get_real_balance() if USE_REAL_TRADING else None
         }
         
         return jsonify(response_data)
     
     except Exception as e:
+        print(f"API Status Error: {e}")
         return jsonify({'error': str(e)}), 500
+
 
 def run_flask_app():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
@@ -1746,6 +1858,7 @@ def run_enhanced_bot():
     # Initialize
     init_database()
     portfolio['positions'] = load_active_positions()
+    sync_real_balance()
     
     print("🚀 ENHANCED SMART TRADING BOT - ADVANCED MODE")
     print("⚡ Quick checks: Every 15 seconds (positions + trailing stops)")
@@ -1775,6 +1888,7 @@ def run_enhanced_bot():
     pattern_memory = {}
     
     last_full_analysis = 0
+    last_balance_sync = 0
     iteration = 0
     quick_checks_count = 0
     full_analyses_count = 0
@@ -1783,6 +1897,11 @@ def run_enhanced_bot():
         try:
             iteration += 1
             current_time = time.time()
+
+            if current_time - last_balance_sync >= 300:  # 5 minutes
+                if USE_REAL_TRADING:
+                    sync_real_balance()
+                last_balance_sync = current_time
             
             # ========== QUICK CHECK MODE (Every 15 seconds) ==========
             if portfolio['positions']:
@@ -1813,6 +1932,9 @@ def run_enhanced_bot():
                 print(f"\n\n{'='*80}")
                 print(f"🧠 FULL MARKET ANALYSIS #{full_analyses_count}")
                 print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                mode_indicator = "🔴 REAL TRADING" if USE_REAL_TRADING else "📝 PAPER TRADING"
+                print(f"Mode: {mode_indicator}")
+                print(f"Current Balance: ${portfolio['balance']:.2f}")
                 print(f"Quick checks since last analysis: {quick_checks_count}")
                 print("="*80)
                 
