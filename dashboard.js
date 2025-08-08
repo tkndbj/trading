@@ -19,7 +19,7 @@ function initPortfolioChart() {
       labels: ["Cash"],
       datasets: [
         {
-          data: [1000],
+          data: [45.57],
           backgroundColor: ["#60a5fa"],
           borderWidth: 0,
         },
@@ -158,11 +158,11 @@ function updateTradingModeIndicator(data) {
 
 function updateSummaryCards(data) {
   // Use real balance from API response
-  const currentBalance = data.balance || 1000;
+  const currentBalance = data.balance || 45.57;
   const totalValue = data.total_value || currentBalance;
 
   // Calculate PnL based on starting balance (you may want to track this differently)
-  const startingBalance = 1000; // You might want to store this in the database
+  const startingBalance = 45.57; // You might want to store this in the database
   const pnl = totalValue - startingBalance;
   const pnlPercent = (pnl / startingBalance) * 100;
 
@@ -317,8 +317,8 @@ function updateCostTracking(costData) {
   // Update current costs
   const currentCosts = document.getElementById("current-costs");
   if (currentCosts) {
-    const totalValue = window.data?.total_value || 1000;
-    const netProfit = totalValue - 1000 - costData.current.total;
+    const totalValue = window.data?.total_value || 45.57;
+    const netProfit = totalValue - 45.57 - costData.current.total;
 
     currentCosts.innerHTML = `
       <div class="text-center bg-gray-700/30 rounded-lg p-3">
@@ -357,7 +357,7 @@ function updateCostTracking(costData) {
         <p class="text-lg font-bold text-cyan-400">
           ${
             costData.current.total > 0
-              ? ((totalValue - 1000) / costData.current.total).toFixed(1)
+              ? ((totalValue - 45.57) / costData.current.total).toFixed(1)
               : "∞"
           }x
         </p>
