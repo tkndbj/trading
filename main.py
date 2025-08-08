@@ -2071,10 +2071,7 @@ def run_enhanced_bot():
                             if any(p['coin'] == coin for p in portfolio['positions'].values()):
                                 continue
                             
-                            # Skip if balance too low
-                            if portfolio['balance'] < 50:
-                                print(f"   ⚠️ Insufficient balance (${portfolio['balance']:.2f})")
-                                break
+                            
                             
                             opportunities_analyzed += 1
                             
