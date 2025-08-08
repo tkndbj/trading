@@ -214,7 +214,7 @@ def get_real_balance():
             
             for balance in balances:
                 # Look for USDT balance specifically
-                if balance['asset'] == 'USDT':
+                if balance['asset'] in ['USDC', 'BNFCR']:
                     available_balance = float(balance['balance'])
                     wallet_balance = float(balance.get('walletBalance', balance['balance']))
                     
