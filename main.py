@@ -15,7 +15,6 @@ import sqlite3
 from collections import deque
 
 
-
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
 
@@ -123,22 +122,29 @@ def get_open_positions():
                 symbol = pos['symbol']
                 coin = symbol.replace('USDT', '').replace('USDC', '').replace('BNFCR', '')
                 
+                # Handle different API response formats
+                unrealized_pnl = pos.get('unRealizedPnl') or pos.get('unrealizedPnl') or '0'
+                entry_price = pos.get('entryPrice') or pos.get('avgPrice') or '0'
+                mark_price = pos.get('markPrice') or pos.get('lastPrice') or '0'
+                
                 open_positions[symbol] = {
                     'coin': coin,
                     'symbol': symbol,
                     'size': size,
                     'direction': 'LONG' if size > 0 else 'SHORT',
-                    'entry_price': float(pos['entryPrice']),
-                    'mark_price': float(pos['markPrice']),
-                    'pnl': float(pos['unRealizedPnl']),
-                    'leverage': int(float(pos['leverage'])),
-                    'notional': abs(size * float(pos['markPrice']))
+                    'entry_price': float(entry_price),
+                    'mark_price': float(mark_price),
+                    'pnl': float(unrealized_pnl),
+                    'leverage': int(float(pos.get('leverage', '1'))),
+                    'notional': abs(size * float(mark_price))
                 }
         
         return open_positions
         
     except Exception as e:
         print(f"Error getting positions: {e}")
+        import traceback
+        traceback.print_exc()
         return {}
 
 def place_futures_order(symbol, side, quantity, leverage=10, order_type="MARKET"):
@@ -1400,8 +1406,8 @@ def run_enhanced_bot():
             # Quick position monitoring
             current_positions = monitor_positions()
             
-            # Full analysis every 2 minutes
-            if current_time - last_full_analysis >= FULL_ANALYSIS_INTERVAL:
+            # Full analysis every 3 minutes (increased from 2 minutes)
+            if current_time - last_full_analysis >= 180:  # 3 minutes = 180 seconds
                 print(f"\n{'='*80}")
                 print(f"🧠 LIVE MARKET ANALYSIS #{iteration}")
                 print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1483,7 +1489,8 @@ def run_enhanced_bot():
                         if symbol_check in current_positions:
                             continue
                         
-                        if opportunities_found >= 2:  # Limit trades per cycle
+                        if opportunities_found >= 1:  # Limit to 1 trade per cycle for safety
+                            print(f"   🛡️ Safety limit: 1 trade per cycle")
                             break
                         
                         opportunities_analyzed += 1
@@ -1520,7 +1527,7 @@ def run_enhanced_bot():
                                 risk_reward = trade_params.get('tp_percentage', 0) / trade_params.get('sl_percentage', 1)
                                 print(f"      Risk/Reward: 1:{risk_reward:.1f}")
                                 
-                                if risk_reward >= 1.5:
+                                if risk_reward >= 2.0:  # Increased minimum risk/reward to 2:1
                                     print(f"   ✅ HIGH-CONFIDENCE OPPORTUNITY FOUND!")
                                     print(f"      {trade_params['direction']} {coin} | Confidence: {trade_params['confidence']}/10 | Leverage: {trade_params['leverage']}x")
                                     
