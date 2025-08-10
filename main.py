@@ -3158,13 +3158,13 @@ def run_enhanced_bot():
     print("   • ATR-based Position Sizing")
     print("💰 Max positions: 4 concurrent")
     print("🎯 Min confidence: 6/10 (auto-tuned)")
-    print("📊 Coins: BTC, ETH, SOL, BNB, ADA, DOGE, AVAX, TAO, LINK, DOT, UNI, FET")
+    print("📊 Coins: 'BTC', 'ETH', 'SOL', 'BNB', 'SEI', 'DOGE', 'TIA', 'TAO', 'ARB', 'SUI', 'UNI', 'FET'")
     print("🌐 Dashboard: http://localhost:5000")
     print("="*80)
     
     # Price histories for technical analysis
-    target_coins = ['BTC', 'ETH', 'SOL', 'BNB', 'ADA', 'DOGE', 
-                   'AVAX', 'TAO', 'LINK', 'DOT', 'UNI', 'FET']
+    target_coins = ['BTC', 'ETH', 'SOL', 'BNB', 'SEI', 'DOGE', 
+                       'TIA', 'TAO', 'ARB', 'SUI', 'UNI', 'FET']
     price_histories = {coin: [] for coin in target_coins}
     
     # Memory and pattern tracking
