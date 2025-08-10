@@ -19,10 +19,6 @@ from sklearn.metrics.pairwise import cosine_similarity
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
 
-# External data API keys
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")  # Get from newsapi.org
-ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY")  # Get from alphavantage.co
-
 # Cost tracking with projections
 cost_tracker = {
     'openai_tokens': 0,
@@ -60,7 +56,8 @@ class TradingMemory:
         self.conversation_history = [
             {"role": "system", "content": """You are an evolving trading AI that learns from every decision. 
              Remember patterns, outcomes, and market conditions to make increasingly better trades.
-             Build on your experience and adapt your strategy based on what works."""}
+             Build on your experience and adapt your strategy based on what works.
+             Focus on technical analysis: MACD, RSI, Support/Resistance, Volume Profile, Liquidity."""}
         ]
         self.recent_context = deque(maxlen=100)  # Last 100 decisions
         self.market_patterns = {}
@@ -149,6 +146,7 @@ CURRENT ANALYSIS for {coin}:
 
 Based on your memory, learned patterns, and current analysis, make your decision.
 Consider what worked before and what failed for {coin} specifically.
+Focus on technical indicators: MACD, RSI, Volume Profile, Support/Resistance levels.
 """
         
         # Add to conversation
@@ -268,7 +266,7 @@ class PatternLearner:
         pattern = f"{regime}_{rsi_range}_{volume_trend}_{tf_alignment}"
         return pattern
     
-    def create_trade_embedding(self, market_data, indicators, external_data):
+    def create_trade_embedding(self, market_data, indicators):
         """Convert trade context to numerical vector for similarity matching"""
         features = [
             market_data.get('price', 0),
@@ -277,11 +275,11 @@ class PatternLearner:
             indicators.get('atr', 0),
             indicators.get('volume_ratio', 1),
             indicators.get('bb_width', 0),
-            external_data.get('news_sentiment', 0),
-            external_data.get('fear_greed', 50),
-            external_data.get('social_sentiment', 0),
+            indicators.get('macd_histogram', 0),
+            indicators.get('macd_signal', 0),
             len(indicators.get('support_levels', [])),
             len(indicators.get('resistance_levels', [])),
+            indicators.get('volume_profile_poc', 0),
         ]
         
         # Normalize features to prevent scale issues
@@ -290,7 +288,7 @@ class PatternLearner:
         
         return np.array(features)
     
-    def record_pattern_outcome(self, market_conditions, indicators, external_data, 
+    def record_pattern_outcome(self, market_conditions, indicators, 
                              decision, was_successful, pnl_percent, coin):
         """Record pattern outcome for learning"""
         pattern_hash = self.create_pattern_hash(market_conditions, indicators)
@@ -323,8 +321,7 @@ class PatternLearner:
         # Store embedding for similarity matching
         embedding = self.create_trade_embedding(
             market_conditions.get('market_data', {}), 
-            indicators, 
-            external_data
+            indicators
         )
         
         self.embeddings.append(embedding)
@@ -343,7 +340,7 @@ class PatternLearner:
             self.outcomes = self.outcomes[-500:]
             self.metadata = self.metadata[-500:]
     
-    def get_pattern_recommendation(self, market_conditions, indicators, external_data, coin):
+    def get_pattern_recommendation(self, market_conditions, indicators, coin):
         """Get recommendation based on learned patterns"""
         pattern_hash = self.create_pattern_hash(market_conditions, indicators)
         
@@ -367,8 +364,7 @@ class PatternLearner:
         if self.embeddings:
             current_embedding = self.create_trade_embedding(
                 market_conditions.get('market_data', {}),
-                indicators,
-                external_data
+                indicators
             )
             
             similarities = cosine_similarity([current_embedding], self.embeddings)[0]
@@ -412,157 +408,6 @@ class PatternLearner:
         
         return recommendations
 
-class ExternalDataManager:
-    """Manages external data sources for market sentiment and news"""
-    def __init__(self):
-        self.cache = {}
-        self.cache_duration = 300  # 5 minutes
-        
-    def get_news_sentiment(self, coin):
-        """Get news sentiment for a coin using News API"""
-        cache_key = f"news_{coin}"
-        
-        if self._is_cached(cache_key):
-            return self.cache[cache_key]['data']
-        
-        if not NEWS_API_KEY:
-            return 0  # Neutral if no API key
-        
-        try:
-            # Search for recent news about the coin
-            url = "https://newsapi.org/v2/everything"
-            params = {
-                'q': f'{coin} OR {coin}USD OR {coin}USDT',
-                'language': 'en',
-                'sortBy': 'publishedAt',
-                'pageSize': 20,
-                'from': (datetime.now() - timedelta(hours=24)).isoformat(),
-                'apiKey': NEWS_API_KEY
-            }
-            
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                articles = response.json().get('articles', [])
-                
-                if not articles:
-                    sentiment = 0
-                else:
-                    # Analyze sentiment using OpenAI
-                    headlines = [article['title'] for article in articles[:10]]
-                    sentiment = self._analyze_news_sentiment(headlines, coin)
-                
-                self._cache_data(cache_key, sentiment)
-                return sentiment
-            
-        except Exception as e:
-            print(f"News API error for {coin}: {e}")
-        
-        return 0
-    
-    def get_fear_greed_index(self):
-        """Get crypto fear and greed index"""
-        cache_key = "fear_greed"
-        
-        if self._is_cached(cache_key):
-            return self.cache[cache_key]['data']
-        
-        try:
-            url = "https://api.alternative.me/fng/"
-            response = requests.get(url, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                fear_greed = int(data['data'][0]['value'])
-                
-                self._cache_data(cache_key, fear_greed)
-                return fear_greed
-                
-        except Exception as e:
-            print(f"Fear & Greed API error: {e}")
-        
-        return 50  # Neutral default
-    
-    def get_social_sentiment(self, coin):
-        """Get social media sentiment (simplified using news as proxy)"""
-        # For now, use news sentiment as social sentiment proxy
-        # In production, you could integrate Twitter API, Reddit API, etc.
-        news_sentiment = self.get_news_sentiment(coin)
-        
-        # Add some randomness to differentiate from news
-        social_modifier = hash(coin + str(datetime.now().hour)) % 21 - 10  # -10 to +10
-        social_sentiment = max(-100, min(100, news_sentiment + social_modifier))
-        
-        return social_sentiment
-    
-    def get_whale_activity(self, coin):
-        """Get whale movement data (mock implementation)"""
-        # This would integrate with Whale Alert API in production
-        # For now, return neutral
-        return {'large_transactions': 0, 'net_flow': 0}
-    
-    def get_comprehensive_sentiment(self, coin):
-        """Get all external sentiment data for a coin"""
-        return {
-            'news_sentiment': self.get_news_sentiment(coin),
-            'fear_greed': self.get_fear_greed_index(),
-            'social_sentiment': self.get_social_sentiment(coin),
-            'whale_activity': self.get_whale_activity(coin)
-        }
-    
-    def _analyze_news_sentiment(self, headlines, coin):
-        """Analyze news sentiment using AI"""
-        if not client or not headlines:
-            return 0
-        
-        try:
-            headlines_text = '\n'.join(headlines)
-            
-            prompt = f"""
-Analyze the sentiment of these recent news headlines about {coin}:
-
-{headlines_text}
-
-Rate the overall sentiment from -100 (very negative) to +100 (very positive).
-Consider price implications, adoption news, regulatory changes, etc.
-
-Return only a number between -100 and +100.
-"""
-            
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=10,
-                temperature=0.3
-            )
-            
-            track_cost('openai', 0.00005, '100')
-            
-            # Extract number from response
-            sentiment_text = response.choices[0].message.content.strip()
-            sentiment = int(''.join(filter(lambda x: x.isdigit() or x == '-', sentiment_text)))
-            
-            return max(-100, min(100, sentiment))
-            
-        except Exception as e:
-            print(f"Sentiment analysis error: {e}")
-            return 0
-    
-    def _is_cached(self, key):
-        """Check if data is cached and still valid"""
-        if key not in self.cache:
-            return False
-        
-        cache_time = self.cache[key]['timestamp']
-        return (datetime.now() - cache_time).seconds < self.cache_duration
-    
-    def _cache_data(self, key, data):
-        """Cache data with timestamp"""
-        self.cache[key] = {
-            'data': data,
-            'timestamp': datetime.now()
-        }
-
 class SmartProfitManager:
     """Advanced profit-taking and stop management system"""
     
@@ -570,8 +415,8 @@ class SmartProfitManager:
         self.profit_signals = {}
         self.exit_patterns = {}
         
-    def analyze_profit_exit_signals(self, position, current_price, market_data, multi_tf_data, external_data):
-        """Comprehensive profit-taking analysis"""
+    def analyze_profit_exit_signals(self, position, current_price, market_data, multi_tf_data):
+        """Comprehensive profit-taking analysis based on technical indicators"""
         
         coin = position['coin']
         entry_price = position['entry_price']
@@ -630,15 +475,7 @@ class SmartProfitManager:
             exit_signals.append(supply_demand_signal)
             signal_strength += supply_demand_signal['strength']
         
-        # 7. External Sentiment Shift
-        sentiment_signal = self._analyze_sentiment_shift(
-            external_data, position.get('external_data', {}), direction
-        )
-        if sentiment_signal['strength'] > 0:
-            exit_signals.append(sentiment_signal)
-            signal_strength += sentiment_signal['strength']
-        
-        # 8. Time-based Profit Taking
+        # 7. Time-based Profit Taking
         time_signal = self._analyze_time_based_exit(position, profit_pct)
         if time_signal['strength'] > 0:
             exit_signals.append(time_signal)
@@ -659,22 +496,22 @@ class SmartProfitManager:
     
     def _analyze_rsi_divergence(self, multi_tf_data, current_price, direction):
         """Detect RSI divergence for profit taking"""
-        if '1h' not in multi_tf_data or '15m' not in multi_tf_data:
+        if '1h' not in multi_tf_data or '4h' not in multi_tf_data:
             return {'strength': 0, 'signal': 'No TF data'}
         
-        # Check 1H and 15M RSI
+        # Check 1H and 4H RSI
         h1_closes = multi_tf_data['1h']['closes'][-20:]
-        m15_closes = multi_tf_data['15m']['closes'][-20:]
+        h4_closes = multi_tf_data['4h']['closes'][-20:]
         
-        if len(h1_closes) < 15 or len(m15_closes) < 15:
+        if len(h1_closes) < 15 or len(h4_closes) < 15:
             return {'strength': 0, 'signal': 'Insufficient data'}
         
         h1_rsi = calculate_rsi(h1_closes)
-        m15_rsi = calculate_rsi(m15_closes)
+        h4_rsi = calculate_rsi(h4_closes)
         
         # Look for divergence
         recent_highs_h1 = h1_closes[-5:]
-        recent_highs_m15 = m15_closes[-5:]
+        recent_highs_h4 = h4_closes[-5:]
         
         price_making_higher_highs = max(recent_highs_h1) > max(h1_closes[-10:-5])
         price_making_lower_lows = min(recent_highs_h1) < min(h1_closes[-10:-5])
@@ -685,7 +522,7 @@ class SmartProfitManager:
         if direction == 'LONG':
             # Bearish divergence: Price higher highs, RSI lower highs
             if price_making_higher_highs and h1_rsi < 65:
-                if m15_rsi > 70:  # Overbought on shorter TF
+                if h4_rsi > 70:  # Overbought on higher TF
                     divergence_strength = 3
                     signal_type = "Bearish RSI divergence detected"
                 elif h1_rsi > 60:
@@ -694,7 +531,7 @@ class SmartProfitManager:
         else:  # SHORT
             # Bullish divergence: Price lower lows, RSI higher lows
             if price_making_lower_lows and h1_rsi > 35:
-                if m15_rsi < 30:  # Oversold on shorter TF
+                if h4_rsi < 30:  # Oversold on higher TF
                     divergence_strength = 3
                     signal_type = "Bullish RSI divergence detected"
                 elif h1_rsi < 40:
@@ -705,7 +542,7 @@ class SmartProfitManager:
             'strength': divergence_strength,
             'signal': signal_type,
             'h1_rsi': h1_rsi,
-            'm15_rsi': m15_rsi
+            'h4_rsi': h4_rsi
         }
     
     def _analyze_volume_patterns(self, market_data, multi_tf_data, direction):
@@ -750,11 +587,11 @@ class SmartProfitManager:
     
     def _analyze_support_resistance_interaction(self, current_price, multi_tf_data, direction, profit_pct):
         """Analyze interaction with key S/R levels"""
-        if '1h' not in multi_tf_data:
+        if '4h' not in multi_tf_data:
             return {'strength': 0, 'signal': 'No price data'}
         
         # Get support/resistance levels
-        sr_levels = identify_support_resistance(multi_tf_data['1h']['candles'])
+        sr_levels = identify_support_resistance(multi_tf_data['4h']['candles'])
         
         signal_strength = 0
         signal_type = ""
@@ -792,7 +629,7 @@ class SmartProfitManager:
         return {
             'strength': signal_strength,
             'signal': signal_type,
-            'nearest_level': nearest_resistance if direction == 'LONG' else nearest_support if 'nearest_support' in locals() else None
+            'nearest_level': nearest_resistance if direction == 'LONG' and 'nearest_resistance' in locals() else nearest_support if 'nearest_support' in locals() else None
         }
     
     def _analyze_momentum_shift(self, multi_tf_data, direction):
@@ -845,12 +682,12 @@ class SmartProfitManager:
     
     def _analyze_liquidity_conditions(self, market_data, multi_tf_data):
         """Analyze liquidity conditions for optimal exit timing"""
-        if '5m' not in multi_tf_data:
+        if '1h' not in multi_tf_data:
             return {'strength': 0, 'signal': 'No liquidity data'}
         
         # Volume profile analysis
-        recent_closes = multi_tf_data['5m']['closes'][-20:]
-        recent_volumes = multi_tf_data['5m']['volumes'][-20:]
+        recent_closes = multi_tf_data['1h']['closes'][-20:]
+        recent_volumes = multi_tf_data['1h']['volumes'][-20:]
         
         if len(recent_closes) < 10:
             return {'strength': 0, 'signal': 'Insufficient data'}
@@ -860,8 +697,8 @@ class SmartProfitManager:
         current_price = market_data['price']
         
         # Bid-ask spread analysis (approximated from price action)
-        recent_highs = multi_tf_data['5m']['highs'][-10:]
-        recent_lows = multi_tf_data['5m']['lows'][-10:]
+        recent_highs = multi_tf_data['1h']['highs'][-10:]
+        recent_lows = multi_tf_data['1h']['lows'][-10:]
         
         avg_spread = sum(h - l for h, l in zip(recent_highs, recent_lows)) / len(recent_highs)
         spread_pct = avg_spread / current_price * 100
@@ -949,45 +786,6 @@ class SmartProfitManager:
             'top_zones': [(p, v) for p, v in top_zones[:3]]
         }
     
-    def _analyze_sentiment_shift(self, current_external, entry_external, direction):
-        """Detect significant sentiment shifts since entry"""
-        if not current_external or not entry_external:
-            return {'strength': 0, 'signal': 'No sentiment data'}
-        
-        # Calculate sentiment changes
-        news_change = current_external.get('news_sentiment', 0) - entry_external.get('news_sentiment', 0)
-        fg_change = current_external.get('fear_greed', 50) - entry_external.get('fear_greed', 50)
-        social_change = current_external.get('social_sentiment', 0) - entry_external.get('social_sentiment', 0)
-        
-        signal_strength = 0
-        signal_type = ""
-        
-        # Significant negative sentiment shift for LONG positions
-        if direction == 'LONG':
-            if news_change < -30 or fg_change < -20:
-                signal_strength = 3
-                signal_type = "Major negative sentiment shift detected"
-            elif news_change < -15 and social_change < -15:
-                signal_strength = 2
-                signal_type = "Moderate negative sentiment shift"
-        
-        # Significant positive sentiment shift for SHORT positions  
-        else:  # SHORT
-            if news_change > 30 or fg_change > 20:
-                signal_strength = 3
-                signal_type = "Major positive sentiment shift detected"
-            elif news_change > 15 and social_change > 15:
-                signal_strength = 2
-                signal_type = "Moderate positive sentiment shift"
-        
-        return {
-            'strength': signal_strength,
-            'signal': signal_type,
-            'news_change': news_change,
-            'fg_change': fg_change,
-            'social_change': social_change
-        }
-    
     def _analyze_time_based_exit(self, position, profit_pct):
         """Time-based profit taking logic"""
         entry_time = datetime.strptime(position['entry_time'], '%Y-%m-%d %H:%M:%S')
@@ -1063,7 +861,6 @@ class SmartProfitManager:
 # Initialize memory systems
 trading_memory = TradingMemory()
 pattern_learner = PatternLearner()
-external_data_manager = ExternalDataManager()
 smart_profit_manager = SmartProfitManager()
 
 # Enhanced Database setup
@@ -1095,10 +892,9 @@ def init_database():
             profitable BOOLEAN,
             market_conditions TEXT,
             timeframe_analysis TEXT,
-            news_sentiment REAL,
-            social_sentiment REAL,
-            fear_greed_index INTEGER,
-            external_data TEXT,
+            rsi_entry REAL,
+            macd_entry REAL,
+            volume_ratio REAL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -1121,7 +917,6 @@ def init_database():
             reasoning TEXT,
             market_regime TEXT,
             atr_at_entry REAL,
-            external_data TEXT,
             last_checked DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -1142,11 +937,8 @@ def init_database():
             rsi_entry REAL,
             rsi_exit REAL,
             volume_ratio REAL,
-            sentiment_score REAL,
+            macd_entry REAL,
             timeframe_alignment TEXT,
-            news_sentiment REAL,
-            social_sentiment REAL,
-            fear_greed_index INTEGER,
             pattern_hash TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -1621,8 +1413,8 @@ def save_active_position(position_id, position):
         INSERT OR REPLACE INTO active_positions 
         (position_id, coin, direction, entry_price, entry_time, position_size,
          leverage, notional_value, stop_loss, take_profit, duration_target,
-         confidence, reasoning, market_regime, atr_at_entry, external_data)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         confidence, reasoning, market_regime, atr_at_entry)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         position_id,
         position['coin'],
@@ -1638,8 +1430,7 @@ def save_active_position(position_id, position):
         position.get('confidence', 5),
         position.get('reasoning', ''),
         position.get('market_regime', 'UNKNOWN'),
-        position.get('atr', 0),
-        json.dumps(position.get('external_data', {}))
+        position.get('atr', 0)
     ))
     
     conn.commit()
@@ -1671,7 +1462,6 @@ def load_active_positions():
     active_positions = {}
     for pos in positions:
         position_id = pos[0]
-        external_data = json.loads(pos[15]) if len(pos) > 15 and pos[15] else {}
         
         active_positions[position_id] = {
             'coin': pos[1],
@@ -1687,8 +1477,7 @@ def load_active_positions():
             'confidence': pos[11],
             'reasoning': pos[12],
             'market_regime': pos[13] if len(pos) > 13 else 'UNKNOWN',
-            'atr': pos[14] if len(pos) > 14 else 0,
-            'external_data': external_data
+            'atr': pos[14] if len(pos) > 14 else 0
         }
     
     conn.close()
@@ -1942,13 +1731,12 @@ def get_quick_prices(coins):
     return prices
 
 def get_multi_timeframe_data(symbol):
-    """Get multi-timeframe data for a single symbol"""
+    """Get multi-timeframe data for specific timeframes: 1h, 4h, 12h, 1d"""
     base_url = "https://api.binance.com/api/v3/klines"
     intervals = {
-        '5m': ('5m', 48),    # 4 hours of 5-minute candles
-        '15m': ('15m', 48),  # 12 hours of 15-minute candles
         '1h': ('1h', 48),    # 48 hours of hourly candles
         '4h': ('4h', 42),    # 7 days of 4-hour candles
+        '12h': ('12h', 60),  # 30 days of 12-hour candles
         '1d': ('1d', 30)     # 30 days of daily candles
     }
     
@@ -2362,7 +2150,7 @@ def calculate_dynamic_stops(current_price, atr, support_levels, resistance_level
     }
 
 def analyze_timeframe_alignment(multi_tf_data):
-    """Enhanced timeframe alignment analysis"""
+    """Enhanced timeframe alignment analysis for 1h, 4h, 12h, 1d"""
     if not multi_tf_data:
         return {'aligned': False, 'score': 0, 'direction': 'neutral', 'signals': {}, 'strength': 0}
     
@@ -2540,17 +2328,14 @@ def enhanced_smart_position_analysis(position_id, position, market_data, sentime
             should_close = True
             close_reason = "Take Profit Hit"
     
-    # 🧠 SMART PROFIT MANAGEMENT - NEW!
+    # 🧠 SMART PROFIT MANAGEMENT - Technical Analysis Only
     if not should_close and pnl_percent > 0.01:  # If in profit > 1%
-        # Get external data for sentiment analysis
-        current_external = external_data_manager.get_comprehensive_sentiment(coin)
-        
-        # Analyze all profit-taking signals
+        # Analyze all technical profit-taking signals
         profit_analysis = smart_profit_manager.analyze_profit_exit_signals(
-            position, current_price, market_data[coin], multi_tf_data, current_external
+            position, current_price, market_data[coin], multi_tf_data
         )
         
-        print(f"      🧠 SMART ANALYSIS: {profit_analysis['action']} - {profit_analysis['reason']}")
+        print(f"      🧠 TECHNICAL ANALYSIS: {profit_analysis['action']} - {profit_analysis['reason']}")
         
         # Display key signals
         if profit_analysis['signals']:
@@ -2563,7 +2348,7 @@ def enhanced_smart_position_analysis(position_id, position, market_data, sentime
         # Execute smart profit management
         if profit_analysis['action'] == 'CLOSE_FULL':
             should_close = True
-            close_reason = f"Smart Exit: {profit_analysis['reason']}"
+            close_reason = f"Technical Exit: {profit_analysis['reason']}"
         
         elif profit_analysis['action'] == 'CLOSE_PARTIAL':
             # Implement partial profit taking
@@ -2590,7 +2375,7 @@ def enhanced_smart_position_analysis(position_id, position, market_data, sentime
                 'position_size': partial_amount,
                 'pnl': partial_pnl,
                 'pnl_percent': (partial_pnl / partial_amount) * 100,
-                'reason': f"Smart partial exit: {profit_analysis['reason']}"
+                'reason': f"Technical partial exit: {profit_analysis['reason']}"
             })
         
         elif profit_analysis['action'] == 'MOVE_STOP':
@@ -2602,14 +2387,14 @@ def enhanced_smart_position_analysis(position_id, position, market_data, sentime
                 if new_stop_price > position['stop_loss']:
                     old_stop = position['stop_loss']
                     position['stop_loss'] = new_stop_price
-                    print(f"      📍 SMART STOP MOVED: ${old_stop:.2f} → ${new_stop_price:.2f}")
+                    print(f"      📍 TECHNICAL STOP MOVED: ${old_stop:.2f} → ${new_stop_price:.2f}")
                     print(f"         Securing {new_stop_pct:.1f}% profit")
             else:  # SHORT
                 new_stop_price = entry_price * (1 - new_stop_pct / 100)
                 if new_stop_price < position['stop_loss']:
                     old_stop = position['stop_loss']
                     position['stop_loss'] = new_stop_price
-                    print(f"      📍 SMART STOP MOVED: ${old_stop:.2f} → ${new_stop_price:.2f}")
+                    print(f"      📍 TECHNICAL STOP MOVED: ${old_stop:.2f} → ${new_stop_price:.2f}")
                     print(f"         Securing {new_stop_pct:.1f}% profit")
     
     # Original trailing stop logic (enhanced)
@@ -2646,7 +2431,7 @@ def enhanced_smart_position_analysis(position_id, position, market_data, sentime
     return pnl_amount
 
 def ai_trade_decision_with_memory(coin, market_data, multi_tf_data, learning_insights):
-    """Enhanced AI trading decision with memory and external data"""
+    """Enhanced AI trading decision with memory - Technical Analysis Only"""
     if not client:
         return None
     
@@ -2657,11 +2442,9 @@ def ai_trade_decision_with_memory(coin, market_data, multi_tf_data, learning_ins
     if not tf_alignment['aligned']:
         return {'direction': 'SKIP', 'reason': 'Timeframes not aligned'}
     
-    # Get external sentiment data
-    external_data = external_data_manager.get_comprehensive_sentiment(coin)
-    
-    # Calculate advanced indicators
+    # Calculate advanced technical indicators
     hourly_data = multi_tf_data.get('1h', {})
+    four_hour_data = multi_tf_data.get('4h', {})
     daily_data = multi_tf_data.get('1d', {})
     
     # ATR for volatility
@@ -2670,7 +2453,7 @@ def ai_trade_decision_with_memory(coin, market_data, multi_tf_data, learning_ins
         atr = calculate_atr(hourly_data['highs'], hourly_data['lows'], hourly_data['closes'])
     
     # Support/Resistance levels
-    sr_levels = identify_support_resistance(hourly_data.get('candles', []))
+    sr_levels = identify_support_resistance(four_hour_data.get('candles', []))
     
     # Volume Profile
     volume_profile = calculate_volume_profile(
@@ -2685,7 +2468,13 @@ def ai_trade_decision_with_memory(coin, market_data, multi_tf_data, learning_ins
     vwap = calculate_vwap(hourly_data.get('closes', []), hourly_data.get('volumes', []))
     
     # RSI for pattern matching
-    rsi = calculate_rsi(hourly_data.get('closes', [])) if hourly_data.get('closes') else 50
+    rsi_1h = calculate_rsi(hourly_data.get('closes', [])) if hourly_data.get('closes') else 50
+    rsi_4h = calculate_rsi(four_hour_data.get('closes', [])) if four_hour_data.get('closes') else 50
+    rsi_1d = calculate_rsi(daily_data.get('closes', [])) if daily_data.get('closes') else 50
+    
+    # MACD calculations
+    macd_1h = calculate_macd(hourly_data.get('closes', [])) if hourly_data.get('closes') else {'macd': 0, 'signal': 0, 'histogram': 0}
+    macd_4h = calculate_macd(four_hour_data.get('closes', [])) if four_hour_data.get('closes') else {'macd': 0, 'signal': 0, 'histogram': 0}
     
     # Market conditions for pattern learning
     market_conditions = {
@@ -2697,17 +2486,23 @@ def ai_trade_decision_with_memory(coin, market_data, multi_tf_data, learning_ins
     
     # Technical indicators for pattern matching
     indicators = {
-        'rsi': rsi,
+        'rsi': rsi_1h,
+        'rsi_4h': rsi_4h,
+        'rsi_1d': rsi_1d,
         'atr': atr,
         'volume_ratio': market_data[coin]['volume'] / market_data[coin].get('quote_volume', 1),
         'bb_width': market_regime['indicators'].get('bb_width', 0),
+        'macd_histogram': macd_1h['histogram'],
+        'macd_signal': macd_1h['signal'],
+        'macd_4h_histogram': macd_4h['histogram'],
         'support_levels': sr_levels.get('support', []),
-        'resistance_levels': sr_levels.get('resistance', [])
+        'resistance_levels': sr_levels.get('resistance', []),
+        'volume_profile_poc': volume_profile.get('poc', current_price)
     }
     
     # Get pattern-based recommendations
     pattern_recommendations = pattern_learner.get_pattern_recommendation(
-        market_conditions, indicators, external_data, coin
+        market_conditions, indicators, coin
     )
     
     # Dynamic stops calculation
@@ -2720,9 +2515,9 @@ def ai_trade_decision_with_memory(coin, market_data, multi_tf_data, learning_ins
         market_regime['regime']
     )
     
-    # Enhanced analysis with memory and external data
+    # Enhanced analysis with memory and technical indicators only
     analysis_prompt = f"""
-{coin} ADVANCED TRADING ANALYSIS WITH MEMORY & EXTERNAL DATA
+{coin} ADVANCED TECHNICAL ANALYSIS WITH MEMORY
 
 CURRENT MARKET:
 - Price: ${current_price:.2f} ({market_data[coin]['change_24h']:+.1f}% 24h)
@@ -2731,16 +2526,22 @@ CURRENT MARKET:
 - Timeframe Alignment: {tf_alignment['direction']} (score: {tf_alignment['score']:.1f})
 
 TECHNICAL INDICATORS:
-- RSI: {rsi:.1f}
+- RSI 1H: {rsi_1h:.1f}
+- RSI 4H: {rsi_4h:.1f}  
+- RSI 1D: {rsi_1d:.1f}
 - ATR: ${atr:.2f}
 - VWAP: ${vwap:.2f}
-- Support: {', '.join([f'${s:.2f}' for s in sr_levels['support'][:2]])}
-- Resistance: {', '.join([f'${r:.2f}' for r in sr_levels['resistance'][:2]])}
+- MACD 1H: {macd_1h['macd']:.4f} | Signal: {macd_1h['signal']:.4f} | Histogram: {macd_1h['histogram']:.4f}
+- MACD 4H: {macd_4h['macd']:.4f} | Histogram: {macd_4h['histogram']:.4f}
 
-EXTERNAL SENTIMENT:
-- News Sentiment: {external_data['news_sentiment']}/100
-- Social Sentiment: {external_data['social_sentiment']}/100
-- Fear & Greed Index: {external_data['fear_greed']}/100
+SUPPORT & RESISTANCE:
+- Support: {', '.join([f'${s:.2f}' for s in sr_levels['support'][:3]])}
+- Resistance: {', '.join([f'${r:.2f}' for r in sr_levels['resistance'][:3]])}
+
+VOLUME PROFILE:
+- POC (Point of Control): ${volume_profile.get('poc', current_price):.2f}
+- Value Area High: ${volume_profile.get('val_high', current_price):.2f}
+- Value Area Low: ${volume_profile.get('val_low', current_price):.2f}
 
 PATTERN ANALYSIS:
 {json.dumps(pattern_recommendations, indent=2) if pattern_recommendations else "No similar patterns found"}
@@ -2754,8 +2555,9 @@ LEARNING INSIGHTS:
 - Historical Win Rate: {learning_insights.get('win_rate', 0):.0f}%
 - Best Leverage: {learning_insights.get('best_leverage', 10)}x
 
-Consider all factors: technical analysis, external sentiment, learned patterns, and risk management.
-Provide decision with high confidence only when multiple factors align.
+Focus purely on technical analysis: RSI divergences, MACD signals, volume patterns,
+support/resistance interactions, market regime, and learned patterns.
+Provide decision with high confidence only when multiple technical factors align.
 """
 
     # Use memory-enhanced AI decision
@@ -2807,7 +2609,7 @@ Provide decision with high confidence only when multiple factors align.
     if 'confidence' not in trade_params:
         trade_params['confidence'] = 5
     if 'reasoning' not in trade_params:
-        trade_params['reasoning'] = f"Memory-based decision: {market_regime['regime']} market"
+        trade_params['reasoning'] = f"Technical analysis: {market_regime['regime']} market"
     
     # Adjust leverage based on confidence and pattern recommendations
     if pattern_recommendations:
@@ -2833,8 +2635,8 @@ Provide decision with high confidence only when multiple factors align.
     trade_params['tp_percentage'] = dynamic_stops['tp_percentage']
     trade_params['market_regime'] = market_regime['regime']
     trade_params['atr'] = atr
-    trade_params['external_data'] = external_data
     trade_params['pattern_recommendations'] = pattern_recommendations
+    trade_params['technical_indicators'] = indicators
     
     return trade_params
 
@@ -2887,7 +2689,7 @@ def execute_trade_with_memory(coin, trade_params, current_price):
         else:
             print(f"✅ REAL ORDER EXECUTED: {order_result.get('orderId')}")
     
-    # Store position data with external data
+    # Store position data
     position = {
         'coin': coin,
         'direction': trade_params['direction'],
@@ -2904,14 +2706,14 @@ def execute_trade_with_memory(coin, trade_params, current_price):
         'market_regime': trade_params.get('market_regime', 'UNKNOWN'),
         'atr': trade_params.get('atr', 0),
         'quantity': quantity,
-        'external_data': trade_params.get('external_data', {}),
-        'pattern_recommendations': trade_params.get('pattern_recommendations', {})
+        'pattern_recommendations': trade_params.get('pattern_recommendations', {}),
+        'technical_indicators': trade_params.get('technical_indicators', {})
     }
     
     portfolio['positions'][position_id] = position
     portfolio['balance'] -= position_value
     
-    # Save to database with external data
+    # Save to database
     save_active_position(position_id, position)
     save_trade_to_db({
         'time': timestamp,
@@ -2927,10 +2729,9 @@ def execute_trade_with_memory(coin, trade_params, current_price):
         'take_profit': take_profit_price,
         'confidence': trade_params['confidence'],
         'reason': trade_params['reasoning'],
-        'news_sentiment': trade_params.get('external_data', {}).get('news_sentiment', 0),
-        'social_sentiment': trade_params.get('external_data', {}).get('social_sentiment', 0),
-        'fear_greed_index': trade_params.get('external_data', {}).get('fear_greed', 50),
-        'external_data': json.dumps(trade_params.get('external_data', {}))
+        'rsi_entry': trade_params.get('technical_indicators', {}).get('rsi', 50),
+        'macd_entry': trade_params.get('technical_indicators', {}).get('macd_histogram', 0),
+        'volume_ratio': trade_params.get('technical_indicators', {}).get('volume_ratio', 1)
     })
     
     # Display enhanced trade info
@@ -2943,7 +2744,7 @@ def execute_trade_with_memory(coin, trade_params, current_price):
     print(f"      Market: {trade_params.get('market_regime', 'UNKNOWN')} | Confidence: {trade_params['confidence']}/10")
     print(f"      SL: ${stop_loss_price:.2f} (-{trade_params.get('sl_percentage', 0):.1f}%) | TP: ${take_profit_price:.2f} (+{trade_params.get('tp_percentage', 0):.1f}%)")
     print(f"      Risk/Reward: 1:{risk_reward:.1f}")
-    print(f"      External: News:{trade_params.get('external_data', {}).get('news_sentiment', 0):+.0f} | F&G:{trade_params.get('external_data', {}).get('fear_greed', 50)}")
+    print(f"      Technical: RSI:{trade_params.get('technical_indicators', {}).get('rsi', 50):.0f} | MACD:{trade_params.get('technical_indicators', {}).get('macd_histogram', 0):.3f}")
     print(f"      Reason: {trade_params['reasoning'][:60]}...")
 
 def close_position_with_memory(position_id, position, current_price, reason, pnl_amount):
@@ -2975,23 +2776,17 @@ def close_position_with_memory(position_id, position, current_price, reason, pnl
     trading_memory.add_trade_outcome(coin, outcome_details)
     
     # Record pattern for learning
-    if 'external_data' in position and 'pattern_recommendations' in position:
+    if 'pattern_recommendations' in position and 'technical_indicators' in position:
         market_conditions = {
             'regime': position.get('market_regime', 'UNKNOWN'),
             'market_data': {'price': current_price}
         }
         
-        indicators = {
-            'rsi': 50,  # Would need to calculate actual RSI
-            'atr': position.get('atr', 0)
-        }
-        
-        external_data = position.get('external_data', {})
+        indicators = position.get('technical_indicators', {})
         
         pattern_learner.record_pattern_outcome(
             market_conditions,
-            indicators, 
-            external_data,
+            indicators,
             position['direction'],
             was_successful,
             pnl_percent,
@@ -3005,9 +2800,9 @@ def close_position_with_memory(position_id, position, current_price, reason, pnl
     cursor.execute('''
         INSERT INTO learning_patterns 
         (coin, direction, leverage, confidence, duration_target, profitable, 
-         pnl_percent, market_conditions, news_sentiment, social_sentiment, 
-         fear_greed_index, pattern_hash)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         pnl_percent, market_conditions, rsi_entry, macd_entry, 
+         volume_ratio, pattern_hash, timeframe_alignment)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         coin,
         position['direction'],
@@ -3017,10 +2812,11 @@ def close_position_with_memory(position_id, position, current_price, reason, pnl
         was_successful,
         pnl_percent,
         position.get('market_regime', 'UNKNOWN'),
-        position.get('external_data', {}).get('news_sentiment', 0),
-        position.get('external_data', {}).get('social_sentiment', 0),
-        position.get('external_data', {}).get('fear_greed', 50),
-        f"{coin}_{position['direction']}_{position.get('market_regime', 'UNKNOWN')}"
+        position.get('technical_indicators', {}).get('rsi', 50),
+        position.get('technical_indicators', {}).get('macd_histogram', 0),
+        position.get('technical_indicators', {}).get('volume_ratio', 1),
+        f"{coin}_{position['direction']}_{position.get('market_regime', 'UNKNOWN')}",
+        'bullish' if was_successful else 'bearish'
     ))
     
     conn.commit()
@@ -3043,9 +2839,9 @@ def close_position_with_memory(position_id, position, current_price, reason, pnl
         'pnl_percent': pnl_percent,
         'reason': reason,
         'duration': str(datetime.now() - datetime.strptime(position['entry_time'], '%Y-%m-%d %H:%M:%S')),
-        'news_sentiment': position.get('external_data', {}).get('news_sentiment', 0),
-        'social_sentiment': position.get('external_data', {}).get('social_sentiment', 0),
-        'fear_greed_index': position.get('external_data', {}).get('fear_greed', 50)
+        'rsi_entry': position.get('technical_indicators', {}).get('rsi', 50),
+        'macd_entry': position.get('technical_indicators', {}).get('macd_histogram', 0),
+        'volume_ratio': position.get('technical_indicators', {}).get('volume_ratio', 1)
     })
     
     # Add to history
@@ -3064,7 +2860,7 @@ def close_position_with_memory(position_id, position, current_price, reason, pnl
     trading_mode = "🔴 REAL" if USE_REAL_TRADING else "📝 PAPER"
     
     print(f"   {emoji} CLOSED {position['coin']}: ${pnl_amount:+.2f} ({pnl_percent:+.1f}%) - {reason} {trading_mode}")
-    print(f"      🧠 Pattern learned and stored in memory for future decisions")
+    print(f"      🧠 Technical pattern learned and stored in memory for future decisions")
 
 # Update function references
 def close_position(position_id, position, current_price, reason, pnl_amount):
@@ -3080,7 +2876,7 @@ def execute_trade(coin, trade_params, current_price):
     return execute_trade_with_memory(coin, trade_params, current_price)
 
 def save_trade_to_db(trade_record):
-    """Enhanced trade saving with external data"""
+    """Enhanced trade saving with technical indicators"""
     conn = sqlite3.connect('trading_bot.db')
     cursor = conn.cursor()
     
@@ -3088,9 +2884,8 @@ def save_trade_to_db(trade_record):
         INSERT OR REPLACE INTO trades 
         (timestamp, position_id, coin, action, direction, price, position_size, 
          leverage, notional_value, stop_loss, take_profit, pnl, pnl_percent, 
-         duration, reason, confidence, profitable, news_sentiment, social_sentiment,
-         fear_greed_index, external_data)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         duration, reason, confidence, profitable, rsi_entry, macd_entry, volume_ratio)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         trade_record.get('time'),
         trade_record.get('position_id'),
@@ -3109,17 +2904,16 @@ def save_trade_to_db(trade_record):
         trade_record.get('reason'),
         trade_record.get('confidence'),
         trade_record.get('pnl', 0) > 0 if 'pnl' in trade_record else None,
-        trade_record.get('news_sentiment', 0),
-        trade_record.get('social_sentiment', 0),
-        trade_record.get('fear_greed_index', 50),
-        trade_record.get('external_data', '{}')
+        trade_record.get('rsi_entry', 50),
+        trade_record.get('macd_entry', 0),
+        trade_record.get('volume_ratio', 1)
     ))
     
     conn.commit()
     conn.close()
 
 def get_learning_insights():
-    """Enhanced learning insights with memory data"""
+    """Enhanced learning insights with technical indicator correlations"""
     conn = sqlite3.connect('trading_bot.db')
     cursor = conn.cursor()
     
@@ -3157,45 +2951,66 @@ def get_learning_insights():
     avg_loss = cursor.fetchone()[0]
     insights['avg_loss'] = avg_loss if avg_loss else 0
     
-    # External data correlations
+    # RSI correlations
     cursor.execute('''
         SELECT 
             CASE 
-                WHEN news_sentiment > 20 THEN 'positive_news'
-                WHEN news_sentiment < -20 THEN 'negative_news'
-                ELSE 'neutral_news'
-            END as news_category,
+                WHEN rsi_entry < 30 THEN 'oversold'
+                WHEN rsi_entry < 40 THEN 'low'
+                WHEN rsi_entry < 60 THEN 'neutral'
+                WHEN rsi_entry < 70 THEN 'high'
+                ELSE 'overbought'
+            END as rsi_category,
             AVG(pnl_percent) as avg_pnl,
             COUNT(*) as count
         FROM trades
-        WHERE pnl IS NOT NULL
-        GROUP BY news_category
+        WHERE pnl IS NOT NULL AND rsi_entry IS NOT NULL
+        GROUP BY rsi_category
         HAVING count >= 3
     ''')
     
-    news_performance = cursor.fetchall()
-    insights['news_correlation'] = {row[0]: {'avg_pnl': row[1], 'count': row[2]} for row in news_performance}
+    rsi_performance = cursor.fetchall()
+    insights['rsi_correlation'] = {row[0]: {'avg_pnl': row[1], 'count': row[2]} for row in rsi_performance}
     
-    # Fear & Greed correlations
+    # MACD correlations
     cursor.execute('''
         SELECT 
             CASE 
-                WHEN fear_greed_index < 25 THEN 'extreme_fear'
-                WHEN fear_greed_index < 45 THEN 'fear'
-                WHEN fear_greed_index < 55 THEN 'neutral'
-                WHEN fear_greed_index < 75 THEN 'greed'
-                ELSE 'extreme_greed'
-            END as fg_category,
+                WHEN macd_entry > 0.1 THEN 'strong_bullish'
+                WHEN macd_entry > 0 THEN 'bullish'
+                WHEN macd_entry > -0.1 THEN 'neutral'
+                ELSE 'bearish'
+            END as macd_category,
             AVG(pnl_percent) as avg_pnl,
             COUNT(*) as count
         FROM trades
-        WHERE pnl IS NOT NULL
-        GROUP BY fg_category
+        WHERE pnl IS NOT NULL AND macd_entry IS NOT NULL
+        GROUP BY macd_category
         HAVING count >= 3
     ''')
     
-    fg_performance = cursor.fetchall()
-    insights['fear_greed_correlation'] = {row[0]: {'avg_pnl': row[1], 'count': row[2]} for row in fg_performance}
+    macd_performance = cursor.fetchall()
+    insights['macd_correlation'] = {row[0]: {'avg_pnl': row[1], 'count': row[2]} for row in macd_performance}
+    
+    # Volume correlations
+    cursor.execute('''
+        SELECT 
+            CASE 
+                WHEN volume_ratio > 2.0 THEN 'high_volume'
+                WHEN volume_ratio > 1.5 THEN 'above_average'
+                WHEN volume_ratio > 0.8 THEN 'normal'
+                ELSE 'low_volume'
+            END as volume_category,
+            AVG(pnl_percent) as avg_pnl,
+            COUNT(*) as count
+        FROM trades
+        WHERE pnl IS NOT NULL AND volume_ratio IS NOT NULL
+        GROUP BY volume_category
+        HAVING count >= 3
+    ''')
+    
+    volume_performance = cursor.fetchall()
+    insights['volume_correlation'] = {row[0]: {'avg_pnl': row[1], 'count': row[2]} for row in volume_performance}
     
     # Memory system stats
     insights['memory_stats'] = {
@@ -3223,14 +3038,14 @@ def get_recent_winrate_and_rr(window=50):
     return winrate, avg_rr
 
 def auto_tune_hyperparameters(window=50):
-    """Enhanced auto-tuning with memory and external data"""
+    """Enhanced auto-tuning with technical indicators"""
     conn = sqlite3.connect('trading_bot.db')
     cursor = conn.cursor()
     
-    # Get last N trades with external data
+    # Get last N trades with technical data
     cursor.execute('''
-        SELECT stop_loss, take_profit, pnl_percent, confidence, news_sentiment, 
-               fear_greed_index, social_sentiment
+        SELECT stop_loss, take_profit, pnl_percent, confidence, rsi_entry, 
+               macd_entry, volume_ratio
         FROM trades
         WHERE stop_loss IS NOT NULL AND take_profit IS NOT NULL AND pnl_percent IS NOT NULL
         ORDER BY timestamp DESC
@@ -3242,17 +3057,17 @@ def auto_tune_hyperparameters(window=50):
     if not rows:
         return
     
-    # Enhanced tuning with external factors
+    # Enhanced tuning with technical factors
     best_score = -9999
     best_params = {}
     
     for sl_mult in [1.0, 1.2, 1.5, 1.8, 2.0]:
         for tp_mult in [1.5, 2.0, 2.5, 3.0, 4.0]:
             for conf in [5, 6, 7, 8]:
-                for news_threshold in [-20, 0, 20]:  # News sentiment threshold
+                for rsi_threshold in [30, 40, 50]:  # RSI threshold for entries
                     # Filter trades by parameters
                     filtered = [row for row in rows 
-                              if row[3] >= conf and row[4] >= news_threshold]
+                              if row[3] >= conf and (row[4] is None or row[4] >= rsi_threshold)]
                     
                     if len(filtered) < 10:
                         continue
@@ -3265,12 +3080,12 @@ def auto_tune_hyperparameters(window=50):
                     std = statistics.stdev(profits)
                     score = mean / std if std > 0 else mean
                     
-                    # Bonus for external data correlation
-                    positive_news_trades = [row for row in filtered if row[4] > 10]
-                    if positive_news_trades:
-                        news_avg = sum(row[2] for row in positive_news_trades) / len(positive_news_trades)
-                        if news_avg > 0:
-                            score += 0.1  # Bonus for positive news correlation
+                    # Bonus for good technical conditions
+                    good_rsi_trades = [row for row in filtered if row[4] and 30 <= row[4] <= 70]
+                    if good_rsi_trades:
+                        rsi_avg = sum(row[2] for row in good_rsi_trades) / len(good_rsi_trades)
+                        if rsi_avg > 0:
+                            score += 0.1  # Bonus for good RSI range
                     
                     # Penalty for too few trades
                     score -= 0.05 * (20 - len(filtered)) if len(filtered) < 20 else 0
@@ -3281,7 +3096,7 @@ def auto_tune_hyperparameters(window=50):
                             'sl_mult': sl_mult, 
                             'tp_mult': tp_mult, 
                             'conf': conf,
-                            'news_threshold': news_threshold
+                            'rsi_threshold': rsi_threshold
                         }
     
     # Save best parameters
@@ -3289,12 +3104,12 @@ def auto_tune_hyperparameters(window=50):
         set_hyperparameter('sl_multiplier', best_params['sl_mult'])
         set_hyperparameter('tp_multiplier', best_params['tp_mult'])
         set_hyperparameter('min_confidence', best_params['conf'])
-        set_hyperparameter('news_threshold', best_params['news_threshold'])
+        set_hyperparameter('rsi_threshold', best_params['rsi_threshold'])
         
-        print(f"\n🔧 Enhanced Auto-tuning:")
+        print(f"\n🔧 Technical Auto-tuning:")
         print(f"   SL: {best_params['sl_mult']}x | TP: {best_params['tp_mult']}x")
         print(f"   Min Confidence: {best_params['conf']}/10")
-        print(f"   News Threshold: {best_params['news_threshold']}")
+        print(f"   RSI Threshold: {best_params['rsi_threshold']}")
         print(f"   Sharpe Score: {best_score:.2f}")
 
 def calculate_portfolio_value(market_data):
@@ -3318,30 +3133,29 @@ def calculate_portfolio_value(market_data):
     return max(0, total)
 
 def run_enhanced_bot():
-    """Main bot loop with memory and external data"""
+    """Main bot loop with memory and technical analysis focus"""
     # Initialize
     init_database()
-    initialize_portfolio_tracking()  # ADD THIS LINE
+    initialize_portfolio_tracking()
     portfolio['positions'] = load_active_positions()
     sync_portfolio_data()
     
-    print("🚀 SUPER SMART TRADING BOT - MEMORY & EXTERNAL DATA MODE")
+    print("🚀 TECHNICAL ANALYSIS TRADING BOT - MEMORY MODE")
     print("🧠 Memory Systems:")
     print("   • Trading Memory: Conversation-based learning")
-    print("   • Pattern Learner: Similarity matching & outcomes")
-    print("   • External Data: News, Fear/Greed, Social sentiment")
+    print("   • Pattern Learner: Technical similarity matching")
+    print("   • Focus: Pure technical analysis (RSI, MACD, S/R, Volume)")
     print("⚡ Quick checks: Every 15 seconds (positions + trailing stops)")
-    print("🧠 Full analysis: Every 2 minutes (complete scan + memory)")
-    print("📊 Advanced Features:")
+    print("🧠 Full analysis: Every 2 minutes (complete technical scan)")
+    print("📊 Technical Features:")
+    print("   • Multi-timeframe: 1H, 4H, 12H, 1D")
     print("   • Volume Profile & Liquidity Analysis")
     print("   • Support/Resistance Detection")
     print("   • Market Regime Detection (Trending/Ranging/Volatile)")
     print("   • Dynamic Stop Loss & Take Profit")
-    print("   • Trailing Stops for Winners")
-    print("   • Multi-Indicator Confluence")
-    print("   • Real News Sentiment Analysis")
-    print("   • Fear & Greed Index Integration")
-    print("   • Pattern Memory & Recognition")
+    print("   • RSI Divergence Detection")
+    print("   • MACD Signal Analysis")
+    print("   • ATR-based Position Sizing")
     print("💰 Max positions: 4 concurrent")
     print("🎯 Min confidence: 6/10 (auto-tuned)")
     print("📊 Coins: BTC, ETH, SOL, BNB, ADA, DOGE, AVAX, TAO, LINK, DOT, UNI, FET")
@@ -3354,7 +3168,6 @@ def run_enhanced_bot():
     price_histories = {coin: [] for coin in target_coins}
     
     # Memory and pattern tracking
-    last_external_data_update = 0
     pattern_memory = {}
     
     last_full_analysis = 0
@@ -3400,12 +3213,12 @@ def run_enhanced_bot():
             if current_time - last_full_analysis >= FULL_ANALYSIS_INTERVAL:
                 full_analyses_count += 1
                 print(f"\n\n{'='*80}")
-                print(f"🧠 SUPER SMART ANALYSIS #{full_analyses_count}")
+                print(f"🧠 TECHNICAL ANALYSIS #{full_analyses_count}")
                 print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 mode_indicator = "🔴 REAL TRADING" if USE_REAL_TRADING else "📝 PAPER TRADING"
                 print(f"Mode: {mode_indicator}")
                 print(f"Current Balance: ${portfolio['balance']:.2f}")
-                print(f"Memory: {len(trading_memory.conversation_history)} conversations | {len(pattern_learner.patterns)} patterns learned")
+                print(f"Memory: {len(trading_memory.conversation_history)} conversations | {len(pattern_learner.patterns)} technical patterns")
                 print("="*80)
                 
                 quick_checks_count = 0  # Reset counter
@@ -3420,26 +3233,22 @@ def run_enhanced_bot():
                         if len(price_histories[coin]) > 100:
                             price_histories[coin] = price_histories[coin][-100:]
                 
-                # Update external data every 10 minutes
-                if current_time - last_external_data_update >= 600:
-                    print("📡 Updating external sentiment data...")
-                    last_external_data_update = current_time
-                
-                # Enhanced market overview with sentiment
-                print("\n📊 Market Overview with External Sentiment:")
+                # Technical market overview
+                print("\n📊 Technical Market Overview:")
                 for coin in target_coins[:6]:
                     if coin in market_data:
                         data = market_data[coin]
-                        
-                        # Get external sentiment
-                        external_data = external_data_manager.get_comprehensive_sentiment(coin)
                         
                         # Get multi-timeframe data
                         symbol = f"{coin}USDT"
                         coin_tf_data = get_multi_timeframe_data(symbol)
                         
                         # Calculate indicators
-                        rsi = calculate_rsi(price_histories[coin]) if len(price_histories[coin]) > 14 else 50
+                        rsi_1h = calculate_rsi(coin_tf_data.get('1h', {}).get('closes', [])) if coin_tf_data.get('1h', {}).get('closes') else 50
+                        rsi_4h = calculate_rsi(coin_tf_data.get('4h', {}).get('closes', [])) if coin_tf_data.get('4h', {}).get('closes') else 50
+                        
+                        # MACD
+                        macd_1h = calculate_macd(coin_tf_data.get('1h', {}).get('closes', [])) if coin_tf_data.get('1h', {}).get('closes') else {'histogram': 0}
                         
                         # Detect market regime
                         regime_data = detect_market_regime(coin_tf_data, data['price'])
@@ -3457,48 +3266,40 @@ def run_enhanced_bot():
                         else:
                             trend = "❓"
                         
-                        # Sentiment indicators
-                        news_emoji = "📰✅" if external_data['news_sentiment'] > 10 else "📰❌" if external_data['news_sentiment'] < -10 else "📰➖"
-                        fg_emoji = "😱" if external_data['fear_greed'] < 25 else "😰" if external_data['fear_greed'] < 45 else "😐" if external_data['fear_greed'] < 55 else "🤑" if external_data['fear_greed'] < 75 else "🚀"
+                        # Technical indicators display
+                        rsi_emoji = "🔴" if rsi_1h > 70 else "🟢" if rsi_1h < 30 else "🟡"
+                        macd_emoji = "📈" if macd_1h['histogram'] > 0 else "📉"
                         
-                        print(f"   {coin}: ${data['price']:.2f} {trend} ({data['change_24h']:+.1f}%) RSI:{rsi:.0f}")
-                        print(f"      {news_emoji} News:{external_data['news_sentiment']:+.0f} | {fg_emoji} F&G:{external_data['fear_greed']}")
+                        print(f"   {coin}: ${data['price']:.2f} {trend} ({data['change_24h']:+.1f}%)")
+                        print(f"      {rsi_emoji} RSI: 1H:{rsi_1h:.0f} 4H:{rsi_4h:.0f} | {macd_emoji} MACD:{macd_1h['histogram']:.3f}")
                 
-                # Advanced position management with memory
+                # Advanced position management with technical analysis
                 if portfolio['positions']:
-                    print(f"\n📈 Advanced Position Management with Memory:")
+                    print(f"\n📈 Technical Position Analysis:")
                     sentiment_scores = {}
                     
-                    # Calculate enhanced sentiment for all coins
+                    # Calculate technical sentiment for all coins
                     for coin in market_data:
                         rsi = calculate_rsi(price_histories[coin]) if len(price_histories[coin]) > 14 else 50
                         momentum = market_data[coin]['change_24h']
                         
-                        # Get external data
-                        external_data = external_data_manager.get_comprehensive_sentiment(coin)
-                        
-                        # Complex sentiment calculation with external data
+                        # Technical sentiment calculation
                         sentiment = 0
                         
-                        # Technical sentiment
+                        # RSI sentiment
                         if rsi < 30:
-                            sentiment += 30
+                            sentiment += 30  # Oversold = bullish
                         elif rsi > 70:
-                            sentiment -= 30
+                            sentiment -= 30  # Overbought = bearish
                         else:
                             sentiment += (50 - rsi) * 0.4
                         
                         # Momentum
                         sentiment += min(max(momentum * 1.5, -25), 25)
                         
-                        # External sentiment (weighted)
-                        sentiment += external_data['news_sentiment'] * 0.3
-                        sentiment += (external_data['fear_greed'] - 50) * 0.2
-                        sentiment += external_data['social_sentiment'] * 0.2
-                        
                         sentiment_scores[coin] = sentiment
                     
-                    # Analyze each position with memory
+                    # Analyze each position with technical indicators
                     for pos_id, position in list(portfolio['positions'].items()):
                         coin = position['coin']
                         if coin in market_data:
@@ -3521,41 +3322,41 @@ def run_enhanced_bot():
                             sl_distance = abs(current_price - position['stop_loss']) / current_price * 100
                             tp_distance = abs(position['take_profit'] - current_price) / current_price * 100
                             
-                            # Enhanced display with memory insights
-                            entry_external = position.get('external_data', {})
-                            current_external = external_data_manager.get_comprehensive_sentiment(coin)
+                            # Technical indicators
+                            current_rsi = calculate_rsi(position_tf_data.get('1h', {}).get('closes', [])) if position_tf_data.get('1h', {}).get('closes') else 50
+                            entry_rsi = position.get('technical_indicators', {}).get('rsi', 50)
                             
                             print(f"   • {position['direction']} {coin}: P&L ${pnl_amount:+.2f} ({pnl_pct*100:+.1f}%)")
-                            print(f"     SL: -{sl_distance:.1f}% | TP: +{tp_distance:.1f}% | Sentiment: {sentiment_scores.get(coin, 0):.0f}")
-                            print(f"     Entry News: {entry_external.get('news_sentiment', 0):+.0f} → Current: {current_external['news_sentiment']:+.0f}")
+                            print(f"     SL: -{sl_distance:.1f}% | TP: +{tp_distance:.1f}% | Technical Score: {sentiment_scores.get(coin, 0):.0f}")
+                            print(f"     RSI: Entry {entry_rsi:.0f} → Current {current_rsi:.0f}")
                             
-                            # Memory-enhanced position analysis
+                            # Technical position analysis
                             enhanced_smart_position_analysis(pos_id, position, market_data, sentiment_scores.get(coin, 0), position_tf_data)
                 
-                # Look for new opportunities with memory
+                # Look for new technical opportunities
                 if len(portfolio['positions']) < MAX_CONCURRENT_POSITIONS:
                     if all(len(history) >= 20 for history in price_histories.values()):
                         learning_insights = get_learning_insights()
                         
-                        print(f"\n🤖 Super Smart Opportunity Scan with Memory:")
+                        print(f"\n🤖 Technical Opportunity Scan:")
                         print(f"   Historical Win Rate: {learning_insights['win_rate']:.1f}%")
-                        print(f"   Patterns Learned: {learning_insights['memory_stats']['patterns_learned']}")
+                        print(f"   Technical Patterns: {learning_insights['memory_stats']['patterns_learned']}")
                         print(f"   Successful Patterns: {learning_insights['memory_stats']['successful_patterns']}")
                         
-                        # Show external data correlations
-                        if 'news_correlation' in learning_insights:
-                            best_news = max(learning_insights['news_correlation'].items(), 
+                        # Show technical correlations
+                        if 'rsi_correlation' in learning_insights:
+                            best_rsi = max(learning_insights['rsi_correlation'].items(), 
                                           key=lambda x: x[1]['avg_pnl'], default=None)
-                            if best_news:
-                                print(f"   Best News Condition: {best_news[0]} ({best_news[1]['avg_pnl']:+.1f}% avg)")
+                            if best_rsi:
+                                print(f"   Best RSI Condition: {best_rsi[0]} ({best_rsi[1]['avg_pnl']:+.1f}% avg)")
                         
-                        if 'fear_greed_correlation' in learning_insights:
-                            best_fg = max(learning_insights['fear_greed_correlation'].items(), 
-                                        key=lambda x: x[1]['avg_pnl'], default=None)
-                            if best_fg:
-                                print(f"   Best F&G Condition: {best_fg[0]} ({best_fg[1]['avg_pnl']:+.1f}% avg)")
+                        if 'macd_correlation' in learning_insights:
+                            best_macd = max(learning_insights['macd_correlation'].items(), 
+                                           key=lambda x: x[1]['avg_pnl'], default=None)
+                            if best_macd:
+                                print(f"   Best MACD Condition: {best_macd[0]} ({best_macd[1]['avg_pnl']:+.1f}% avg)")
                         
-                        print(f"   Scanning {len(target_coins)} coins with memory & external data...")
+                        print(f"   Scanning {len(target_coins)} coins with technical analysis...")
                         
                         opportunities_found = 0
                         opportunities_analyzed = 0
@@ -3567,7 +3368,7 @@ def run_enhanced_bot():
                             
                             opportunities_analyzed += 1
                             
-                            # Get comprehensive data
+                            # Get comprehensive technical data
                             symbol = f"{coin}USDT"
                             multi_tf_data = get_multi_timeframe_data(symbol)
                             
@@ -3576,28 +3377,35 @@ def run_enhanced_bot():
                             if regime_data['regime'] == 'TRANSITIONAL' and regime_data['confidence'] < 60:
                                 continue
                             
-                            # Memory-enhanced AI decision
+                            # Technical AI decision
                             trade_params = ai_trade_decision(coin, market_data, multi_tf_data, learning_insights)
                             
                             if trade_params and trade_params['direction'] != 'SKIP':
                                 if trade_params['confidence'] >= get_hyperparameter('min_confidence', 6):
-                                    # Check external sentiment threshold
-                                    external_data = trade_params.get('external_data', {})
-                                    news_threshold = get_hyperparameter('news_threshold', 0)
+                                    # Check technical thresholds
+                                    rsi_threshold = get_hyperparameter('rsi_threshold', 30)
+                                    current_rsi = trade_params.get('technical_indicators', {}).get('rsi', 50)
                                     
-                                    if external_data.get('news_sentiment', 0) >= news_threshold:
+                                    # RSI check based on direction
+                                    rsi_ok = True
+                                    if trade_params['direction'] == 'LONG' and current_rsi > 70:
+                                        rsi_ok = False
+                                    elif trade_params['direction'] == 'SHORT' and current_rsi < 30:
+                                        rsi_ok = False
+                                    
+                                    if rsi_ok:
                                         risk_reward = trade_params.get('tp_percentage', 0) / trade_params.get('sl_percentage', 1)
                                         
                                         if risk_reward >= 1.5:
-                                            print(f"   ✅ Smart Opportunity: {trade_params['direction']} {coin}")
+                                            print(f"   ✅ Technical Opportunity: {trade_params['direction']} {coin}")
                                             print(f"      Confidence: {trade_params['confidence']}/10 | R:R: 1:{risk_reward:.1f}")
-                                            print(f"      News: {external_data.get('news_sentiment', 0):+.0f} | F&G: {external_data.get('fear_greed', 50)}")
+                                            print(f"      RSI: {current_rsi:.0f} | MACD: {trade_params.get('technical_indicators', {}).get('macd_histogram', 0):.3f}")
                                             
                                             # Show pattern recommendation if available
                                             if trade_params.get('pattern_recommendations'):
                                                 best_pattern = max(trade_params['pattern_recommendations'].values(), 
                                                                  key=lambda x: x.get('confidence', 0))
-                                                print(f"      Memory: {best_pattern.get('reason', 'New pattern')}")
+                                                print(f"      Pattern: {best_pattern.get('reason', 'New technical pattern')}")
                                             
                                             execute_trade(coin, trade_params, market_data[coin]['price'])
                                             opportunities_found += 1
@@ -3608,24 +3416,24 @@ def run_enhanced_bot():
                                         else:
                                             print(f"   ⏭️ {coin}: Poor R:R (1:{risk_reward:.1f})")
                                     else:
-                                        print(f"   ⏭️ {coin}: News sentiment too low ({external_data.get('news_sentiment', 0)})")
+                                        print(f"   ⏭️ {coin}: RSI unfavorable ({current_rsi:.0f})")
                                 else:
                                     print(f"   ⏭️ {coin}: Low confidence ({trade_params['confidence']}/10)")
                         
                         if opportunities_found == 0:
-                            print(f"   No high-confidence opportunities from {opportunities_analyzed} coins analyzed")
+                            print(f"   No high-confidence technical opportunities from {opportunities_analyzed} coins")
                     else:
                         data_ready = min(len(h) for h in price_histories.values())
-                        print(f"\n📈 Building price history... ({data_ready}/20 candles)")
+                        print(f"\n📈 Building technical data... ({data_ready}/20 candles)")
                 else:
                     print(f"\n⚠️ Position limit reached ({len(portfolio['positions'])}/{MAX_CONCURRENT_POSITIONS})")
                 
-                # Enhanced portfolio performance
+                # Portfolio performance with technical metrics
                 total_value = calculate_portfolio_value(market_data)
                 pnl = total_value - 1000
                 pnl_pct = (pnl / 1000) * 100
                 
-                # Enhanced Sharpe with external factors
+                # Enhanced Sharpe with technical factors
                 if portfolio['trade_history']:
                     returns = [t['pnl_percent'] for t in portfolio['trade_history'][-20:]]
                     if len(returns) > 1:
@@ -3637,13 +3445,13 @@ def run_enhanced_bot():
                 else:
                     sharpe = 0
                 
-                print(f"\n💼 ENHANCED PORTFOLIO PERFORMANCE:")
+                print(f"\n💼 TECHNICAL PORTFOLIO PERFORMANCE:")
                 print(f"   Total Value: ${total_value:.2f}")
                 print(f"   P&L: ${pnl:+.2f} ({pnl_pct:+.1f}%)")
                 print(f"   Free Balance: ${portfolio['balance']:.2f}")
                 print(f"   Active Positions: {len(portfolio['positions'])}")
                 print(f"   Sharpe Ratio: {sharpe:.2f}")
-                print(f"   🧠 Memory Intelligence: {len(pattern_learner.patterns)} patterns | {len(trading_memory.recent_context)} decisions")
+                print(f"   🧠 Technical Intelligence: {len(pattern_learner.patterns)} patterns | {len(trading_memory.recent_context)} decisions")
                 
                 # Cost tracking
                 costs = get_cost_projections()
@@ -3653,7 +3461,7 @@ def run_enhanced_bot():
                 print(f"   Monthly Projection: ${costs['projections']['monthly']['total']:.2f}")
                 print(f"   Net Profit (after costs): ${pnl - costs['current']['total']:.2f}")
 
-                # Enhanced auto-tuning every 5 cycles
+                # Technical auto-tuning every 5 cycles
                 if full_analyses_count % 5 == 0:
                     auto_tune_hyperparameters(window=50)
                 
@@ -3664,8 +3472,8 @@ def run_enhanced_bot():
             time.sleep(QUICK_CHECK_INTERVAL)
             
         except KeyboardInterrupt:
-            print("\n\n🛑 Super Smart Bot stopped by user")
-            print(f"🧠 Final Memory Stats:")
+            print("\n\n🛑 Technical Trading Bot stopped by user")
+            print(f"🧠 Final Technical Stats:")
             print(f"   Patterns Learned: {len(pattern_learner.patterns)}")
             print(f"   Successful Patterns: {len([p for p in pattern_learner.patterns.values() if p['successes'] > p['failures']])}")
             print(f"   Conversation History: {len(trading_memory.conversation_history)} messages")
@@ -3679,48 +3487,14 @@ def run_enhanced_bot():
 
 if __name__ == "__main__":
     print("\n" + "="*80)
-    print("🚀 SUPER SMART TRADING BOT INITIALIZATION")
+    print("🚀 TECHNICAL ANALYSIS TRADING BOT INITIALIZATION")
     print("="*80)
     
-    # Check API keys
-    missing_keys = []
-    if not NEWS_API_KEY:
-        missing_keys.append("NEWS_API_KEY (get from newsapi.org)")
-    if not ALPHA_VANTAGE_KEY:
-        missing_keys.append("ALPHA_VANTAGE_KEY (get from alphavantage.co)")
-    
-    if missing_keys:
-        print("⚠️  OPTIONAL API KEYS MISSING:")
-        for key in missing_keys:
-            print(f"   • {key}")
-        print("   Bot will work with limited external data")
-        print("   Add these keys for full sentiment analysis")
-        print()
-    
     # Initialize memory systems
-    print("🧠 Initializing Memory Systems...")
-    print(f"   ✅ Trading Memory: Conversation-based learning")
-    print(f"   ✅ Pattern Learner: Similarity matching with {len(pattern_learner.embeddings)} embeddings")
-    print(f"   ✅ External Data Manager: News, F&G, Social sentiment")
-    print()
-    
-    # Test external data connection
-    print("📡 Testing External Data Sources...")
-    try:
-        fear_greed = external_data_manager.get_fear_greed_index()
-        print(f"   ✅ Fear & Greed Index: {fear_greed}/100")
-    except:
-        print(f"   ⚠️  Fear & Greed Index: Connection failed")
-    
-    if NEWS_API_KEY:
-        try:
-            btc_sentiment = external_data_manager.get_news_sentiment('BTC')
-            print(f"   ✅ News Sentiment (BTC): {btc_sentiment}/100")
-        except:
-            print(f"   ⚠️  News API: Connection failed")
-    else:
-        print(f"   ⏭️  News API: Skipped (no API key)")
-    
+    print("🧠 Initializing Technical Memory Systems...")
+    print(f"   ✅ Trading Memory: Technical conversation learning")
+    print(f"   ✅ Pattern Learner: Technical similarity matching with {len(pattern_learner.embeddings)} embeddings")
+    print(f"   ✅ Focus: Pure technical analysis (no external data)")
     print()
     
     # Start Flask dashboard in background
@@ -3733,15 +3507,17 @@ if __name__ == "__main__":
     # Display final configuration
     print("⚙️  FINAL CONFIGURATION:")
     print(f"   Trading Mode: {'🔴 REAL' if USE_REAL_TRADING else '📝 PAPER'}")
+    print(f"   Timeframes: 1H, 4H, 12H, 1D")
     print(f"   Max Positions: {MAX_CONCURRENT_POSITIONS}")
     print(f"   Min Confidence: {MIN_CONFIDENCE_THRESHOLD}/10")
     print(f"   Check Interval: {QUICK_CHECK_INTERVAL}s quick, {FULL_ANALYSIS_INTERVAL}s full")
+    print(f"   Technical Focus: RSI, MACD, S/R, Volume Profile, ATR")
     print(f"   Memory Enabled: ✅")
-    print(f"   External Data: ✅")
+    print(f"   External Data: ❌ (Pure Technical)")
     print(f"   Auto-tuning: ✅")
     print()
     
-    input("Press ENTER to start the Super Smart Trading Bot...")
+    input("Press ENTER to start the Technical Analysis Trading Bot...")
     
     # Start the enhanced bot
     run_enhanced_bot()
