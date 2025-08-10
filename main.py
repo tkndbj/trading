@@ -2003,6 +2003,45 @@ def calculate_portfolio_value(market_data):
     total_pnl = sum(pos['pnl'] for pos in positions.values())
     
     return balance + total_pnl
+
+def get_learning_insights():
+    """Get learning insights from database"""
+    conn = sqlite3.connect('trading_bot.db')
+    cursor = conn.cursor()
+    
+    insights = {}
+    
+    cursor.execute('SELECT COUNT(*) FROM trades WHERE pnl IS NOT NULL')
+    total = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT COUNT(*) FROM trades WHERE pnl > 0')
+    wins = cursor.fetchone()[0]
+    
+    insights['win_rate'] = (wins / total * 100) if total > 0 else 0
+    insights['total_trades'] = total
+    
+    cursor.execute('''
+        SELECT leverage, AVG(pnl_percent) as avg_return
+        FROM trades 
+        WHERE pnl IS NOT NULL 
+        GROUP BY leverage 
+        ORDER BY avg_return DESC 
+        LIMIT 1
+    ''')
+    
+    best_lev = cursor.fetchone()
+    insights['best_leverage'] = best_lev[0] if best_lev else 15
+    
+    cursor.execute('SELECT AVG(pnl) FROM trades WHERE pnl > 0')
+    avg_profit = cursor.fetchone()[0]
+    insights['avg_profit'] = avg_profit if avg_profit else 0
+    
+    cursor.execute('SELECT AVG(pnl) FROM trades WHERE pnl < 0')
+    avg_loss = cursor.fetchone()[0]
+    insights['avg_loss'] = avg_loss if avg_loss else 0
+    
+    conn.close()
+    return insights
     """Get learning insights from database"""
     conn = sqlite3.connect('trading_bot.db')
     cursor = conn.cursor()
