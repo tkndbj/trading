@@ -221,7 +221,7 @@ def close_futures_position(symbol):
         return None
 
 def set_stop_loss_take_profit(symbol, stop_price, take_profit_price, position_side):
-    """Set stop loss and take profit orders"""
+    """Set stop loss and take profit orders with proper price precision"""
     try:
         # Get position info
         positions = get_open_positions()
@@ -230,6 +230,21 @@ def set_stop_loss_take_profit(symbol, stop_price, take_profit_price, position_si
         
         position = positions[symbol]
         quantity = abs(position['size'])
+        
+        # Round prices to proper precision based on coin
+        coin = symbol.replace('USDT', '')
+        if coin in ['BTC']:
+            stop_price = round(stop_price, 1)
+            take_profit_price = round(take_profit_price, 1)
+        elif coin in ['ETH']:
+            stop_price = round(stop_price, 2)
+            take_profit_price = round(take_profit_price, 2)
+        elif coin in ['SOL', 'BNB']:
+            stop_price = round(stop_price, 2)
+            take_profit_price = round(take_profit_price, 2)
+        else:
+            stop_price = round(stop_price, 4)
+            take_profit_price = round(take_profit_price, 4)
         
         # Stop Loss Order
         if position_side == "LONG":
@@ -1106,12 +1121,16 @@ REASON: [one line about key factors]
                 if 'DECISION' in key:
                     trade_params['direction'] = value.upper()
                 elif 'LEVERAGE' in key:
-                    trade_params['leverage'] = min(30, max(10, int(''.join(filter(str.isdigit, value)))))
+                    leverage_str = ''.join(filter(str.isdigit, value))
+                    trade_params['leverage'] = min(30, max(10, int(leverage_str) if leverage_str else 15))
                 elif 'SIZE' in key:
-                    size = float(''.join(filter(lambda x: x.isdigit() or x == '.', value)))
-                    trade_params['position_size'] = min(0.15, max(0.05, size / 100))
+                    size_str = ''.join(filter(lambda x: x.isdigit() or x == '.', value))
+                    if size_str:
+                      size = float(size_str)
+                      trade_params['position_size'] = min(0.15, max(0.05, size / 100))
                 elif 'CONFIDENCE' in key:
-                    trade_params['confidence'] = min(10, max(1, int(''.join(filter(str.isdigit, value)))))
+                    conf_str = ''.join(filter(str.isdigit, value))
+                    trade_params['confidence'] = min(10, max(1, int(conf_str) if conf_str else 5))
                 elif 'REASON' in key:
                     trade_params['reasoning'] = value[:150]
         
