@@ -1680,8 +1680,8 @@ def get_batch_market_data():
         all_tickers = response.json()
         
         # Our target coins
-        target_coins = ['BTC', 'ETH', 'SOL', 'BNB', 'ADA', 'DOGE', 
-                       'AVAX', 'TAO', 'LINK', 'DOT', 'UNI', 'FET']
+        target_coins = ['BTC', 'ETH', 'SOL', 'BNB', 'SEI', 'DOGE', 
+                       'TIA', 'TAO', 'ARB', 'SUI', 'UNI', 'FET']
         
         market_data = {}
         
