@@ -14,9 +14,9 @@ import math
 import sqlite3
 from collections import deque
 
-
-
-
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
 
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
@@ -1136,6 +1136,27 @@ REASON: [one line about key factors]
         print(f"AI Error: {e}")
         return None
 
+def get_symbol_precision(symbol):
+    """Get precision info for symbol from Binance"""
+    try:
+        exchange_info = requests.get(f"{BINANCE_BASE_URL}/fapi/v1/exchangeInfo")
+        if exchange_info.status_code == 200:
+            data = exchange_info.json()
+            for symbol_info in data['symbols']:
+                if symbol_info['symbol'] == symbol:
+                    # Get quantity precision
+                    for filter_info in symbol_info['filters']:
+                        if filter_info['filterType'] == 'LOT_SIZE':
+                            step_size = float(filter_info['stepSize'])
+                            # Calculate decimal places from step size
+                            if step_size >= 1:
+                                return 0
+                            else:
+                                return len(str(step_size).split('.')[-1].rstrip('0'))
+        return 3  # Default fallback
+    except:
+        return 3  # Default fallback
+
 def execute_real_trade(coin, trade_params, current_price):
     """Execute real trade on Binance futures"""
     if trade_params['direction'] == 'SKIP':
@@ -1158,12 +1179,28 @@ def execute_real_trade(coin, trade_params, current_price):
         notional_value = position_value * leverage
         quantity = notional_value / current_price
         
-        # Round quantity to appropriate decimal places
-        quantity = round(quantity, 6)
+        # Get proper precision for this symbol
+        precision = get_symbol_precision(symbol)
+        quantity = round(quantity, precision)
+        
+        # Additional precision fixes for major coins
+        if coin in ['BTC']:
+            quantity = round(quantity, 3)  # BTC: 3 decimals max
+        elif coin in ['ETH']:
+            quantity = round(quantity, 2)  # ETH: 2 decimals max
+        elif coin in ['SOL', 'BNB']:
+            quantity = round(quantity, 1)  # SOL/BNB: 1 decimal max
+        else:
+            quantity = round(quantity, 0)  # Others: whole numbers
         
         if quantity * current_price < 5:  # Binance minimum notional
             print(f"❌ Position too small: ${quantity * current_price:.2f}")
             return
+        
+        print(f"   📊 Trade Details:")
+        print(f"      Quantity: {quantity} {coin}")
+        print(f"      Notional: ${quantity * current_price:.2f}")
+        print(f"      Precision: {precision} decimals")
         
         # Place order
         side = "BUY" if trade_params['direction'] == 'LONG' else "SELL"
@@ -1427,11 +1464,20 @@ def run_enhanced_bot():
                 if len(current_positions) < MAX_CONCURRENT_POSITIONS and current_balance >= 5:
                     learning_insights = get_learning_insights()
                     
-                    print(f"\n🤖 AI Opportunity Scan:")
-                    print(f"   Win Rate: {learning_insights['win_rate']:.1f}%")
+                    print(f"\n🤖 AI Comprehensive Analysis & Opportunity Scan:")
+                    print(f"   Historical Win Rate: {learning_insights['win_rate']:.1f}%")
                     print(f"   Optimal Leverage: {learning_insights.get('best_leverage', 15)}x")
+                    print(f"   Analyzing market conditions...")
+                    
+                    # Get AI context for decision making
+                    ai_context = get_ai_context_memory()
+                    if "win rate" in ai_context.lower():
+                        recent_performance = ai_context.split("RECENT PERFORMANCE:")[1].split("\n")[0].strip() if "RECENT PERFORMANCE:" in ai_context else ""
+                        if recent_performance:
+                            print(f"   Recent AI Performance: {recent_performance}")
                     
                     opportunities_found = 0
+                    opportunities_analyzed = 0
                     
                     for coin in target_coins:
                         # Skip if already have position
@@ -1442,32 +1488,61 @@ def run_enhanced_bot():
                         if opportunities_found >= 2:  # Limit trades per cycle
                             break
                         
+                        opportunities_analyzed += 1
+                        print(f"   🔍 Analyzing {coin}...")
+                        
                         symbol = f"{coin}USDT"
                         multi_tf_data = get_multi_timeframe_data(symbol)
                         
+                        # Market regime analysis
                         regime_data = detect_market_regime(multi_tf_data, market_data[coin]['price'])
+                        print(f"      Market Regime: {regime_data['regime']} (confidence: {regime_data['confidence']:.0f}%)")
+                        
+                        # Timeframe alignment check
+                        tf_alignment = analyze_timeframe_alignment(multi_tf_data)
+                        print(f"      Timeframe Alignment: {tf_alignment['direction']} (score: {tf_alignment['score']:.1f})")
                         
                         if regime_data['regime'] == 'TRANSITIONAL' and regime_data['confidence'] < 60:
+                            print(f"      ⏭️ Skipping: Market too transitional")
                             continue
                         
+                        if not tf_alignment['aligned']:
+                            print(f"      ⏭️ Skipping: Timeframes not aligned")
+                            continue
+                        
+                        # AI decision with full analysis
+                        print(f"      🧠 Running AI analysis with memory context...")
                         trade_params = ai_trade_decision(coin, market_data, multi_tf_data, learning_insights)
                         
                         if trade_params and trade_params['direction'] != 'SKIP':
+                            print(f"      AI Decision: {trade_params['direction']} (Confidence: {trade_params['confidence']}/10)")
+                            print(f"      Reasoning: {trade_params['reasoning'][:60]}...")
+                            
                             if trade_params['confidence'] >= MIN_CONFIDENCE_THRESHOLD:
                                 risk_reward = trade_params.get('tp_percentage', 0) / trade_params.get('sl_percentage', 1)
+                                print(f"      Risk/Reward: 1:{risk_reward:.1f}")
                                 
                                 if risk_reward >= 1.5:
-                                    print(f"   🎯 Trading opportunity: {trade_params['direction']} {coin}")
-                                    print(f"      Confidence: {trade_params['confidence']}/10 | Leverage: {trade_params['leverage']}x")
+                                    print(f"   ✅ HIGH-CONFIDENCE OPPORTUNITY FOUND!")
+                                    print(f"      {trade_params['direction']} {coin} | Confidence: {trade_params['confidence']}/10 | Leverage: {trade_params['leverage']}x")
                                     
                                     execute_real_trade(coin, trade_params, market_data[coin]['price'])
                                     opportunities_found += 1
                                     
-                                    # Wait a bit between trades
+                                    # Wait between trades
                                     time.sleep(2)
+                                else:
+                                    print(f"      ⏭️ Poor risk/reward ratio (1:{risk_reward:.1f})")
+                            else:
+                                print(f"      ⏭️ Low confidence ({trade_params['confidence']}/10 < {MIN_CONFIDENCE_THRESHOLD})")
+                        else:
+                            print(f"      ⏭️ AI recommends SKIP")
                     
                     if opportunities_found == 0:
-                        print(f"   No high-confidence opportunities found")
+                        print(f"   📊 Analysis Complete: No high-confidence opportunities from {opportunities_analyzed} coins")
+                        print(f"      Waiting for better market conditions...")
+                    else:
+                        print(f"   🎯 Executed {opportunities_found} trades from {opportunities_analyzed} analyzed coins")
                 else:
                     if current_balance < 5:
                         print(f"\n⚠️ Balance too low: ${current_balance:.2f}")
