@@ -242,18 +242,28 @@ function updatePositions(positions, marketData) {
     const entryPrice = position.entry_price;
     const direction = position.direction;
     const leverage = position.leverage;
-    const pnl = position.pnl || 0;
     const notional = position.notional || 0;
+    const positionSize = Math.abs(position.size);
 
-    // Calculate PnL percentage
+    // Calculate PnL percentage and dollar amount
     let pnlPercent = 0;
+    let pnlDollar = 0;
+
     if (direction === "LONG") {
       pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+      // For LONG: PnL = (current_price - entry_price) * position_size
+      pnlDollar = (currentPrice - entryPrice) * positionSize;
     } else {
       pnlPercent = ((entryPrice - currentPrice) / entryPrice) * 100;
+      // For SHORT: PnL = (entry_price - current_price) * position_size
+      pnlDollar = (entryPrice - currentPrice) * positionSize;
     }
 
-    const pnlColor = pnl >= 0 ? "text-green-400" : "text-red-400";
+    // Use backend PnL if available and non-zero, otherwise use calculated
+    const displayPnl =
+      position.pnl && position.pnl !== 0 ? position.pnl : pnlDollar;
+
+    const pnlColor = displayPnl >= 0 ? "text-green-400" : "text-red-400";
     const directionColor =
       direction === "LONG" ? "text-green-400" : "text-red-400";
     const directionIcon =
@@ -267,13 +277,11 @@ function updatePositions(positions, marketData) {
           </span>
           <span class="text-white">${coin}</span>
         </td>
-        <td class="py-3 px-3 font-mono text-sm">${Math.abs(
-          position.size
-        ).toFixed(4)}</td>
+        <td class="py-3 px-3 font-mono text-sm">${positionSize.toFixed(4)}</td>
         <td class="py-3 px-3 font-mono text-sm">$${entryPrice.toLocaleString()}</td>
         <td class="py-3 px-3 font-mono text-sm">$${currentPrice.toLocaleString()}</td>
         <td class="py-3 px-3 ${pnlColor} font-semibold">
-          $${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+          $${displayPnl >= 0 ? "+" : ""}${displayPnl.toFixed(2)}
           <br><span class="text-sm">(${
             pnlPercent >= 0 ? "+" : ""
           }${pnlPercent.toFixed(1)}%)</span>
