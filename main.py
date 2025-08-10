@@ -1025,7 +1025,7 @@ def generate_signature(params, secret):
 def get_real_balance():
     """Get real USD balance from Binance Futures (USDT)"""
     if not USE_REAL_TRADING or not BINANCE_API_KEY:
-        return portfolio['balance']
+        raise Exception("REAL TRADING MODE: Binance API keys required!")
     
     try:
         # Use correct futures balance endpoint
@@ -1043,24 +1043,21 @@ def get_real_balance():
             balances = response.json()
             
             for balance in balances:
-                # Look for USDT balance specifically
-                if balance['asset'] in ['USDT', 'USDC', 'BUSD']:
+                if balance['asset'] in ['USDT', 'USDC', 'BUSD', 'BNFCR']:
                     available_balance = float(balance['balance'])
                     wallet_balance = float(balance.get('walletBalance', balance['balance']))
                     
-                    # Use wallet balance (total) rather than available balance
                     if wallet_balance > 0:
                         return wallet_balance
                     elif available_balance > 0:
                         return available_balance
             
-            return portfolio['balance']
+            raise Exception("No USDT balance found in Binance account!")
         else:
-            return portfolio['balance']
+            raise Exception(f"Binance API error: {response.status_code} - {response.text}")
             
     except Exception as e:
-        print(f"Error getting real balance: {e}")
-        return portfolio['balance']
+        raise Exception(f"Failed to get real balance: {e}")
     
 def get_account_info():
     """Get complete Binance Futures account information"""
@@ -1493,7 +1490,7 @@ def remove_active_position(position_id):
 
 # Portfolio management
 portfolio = {
-    'balance': 1000.0,
+    'balance': 0.0,  # Will be immediately updated from Binance
     'positions': {},
     'trade_history': [],
     'learning_data': {
@@ -1632,15 +1629,13 @@ def initialize_portfolio_tracking():
     existing = cursor.fetchone()
     
     if not existing:
-        # Record initial balance
-        if USE_REAL_TRADING:
-            initial_balance = get_real_balance()
-            trading_mode = 'REAL'
-            print(f"🔴 REAL TRADING: Initial balance recorded as ${initial_balance:.2f}")
-        else:
-            initial_balance = portfolio['balance']
-            trading_mode = 'PAPER'
-            print(f"📝 PAPER TRADING: Initial balance recorded as ${initial_balance:.2f}")
+        if not USE_REAL_TRADING:
+            raise Exception("PRODUCTION MODE: Real trading must be enabled!")
+        
+        # Always get real balance for production
+        initial_balance = get_real_balance()
+        trading_mode = 'REAL'
+        print(f"🔴 REAL TRADING: Initial balance recorded as ${initial_balance:.2f}")
         
         cursor.execute('''
             INSERT INTO portfolio_tracking (initial_balance, trading_mode)
@@ -1648,9 +1643,14 @@ def initialize_portfolio_tracking():
         ''', (initial_balance, trading_mode))
         
         portfolio['initial_balance'] = initial_balance
+        portfolio['balance'] = initial_balance  # Set current balance to real balance
     else:
         portfolio['initial_balance'] = existing[0]
+        # Always sync with real balance on startup
+        if USE_REAL_TRADING:
+            portfolio['balance'] = get_real_balance()
         print(f"📊 Loaded existing initial balance: ${existing[0]:.2f} ({existing[1]} mode)")
+        print(f"💰 Current Binance balance: ${portfolio['balance']:.2f}")
     
     conn.commit()
     conn.close()
