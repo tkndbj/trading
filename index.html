@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Enhanced AI Trading Bot Dashboard</title>
+    <title>AI Trading Bot Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link
@@ -38,42 +38,8 @@
         }
       }
 
-      @keyframes slideDown {
-        from {
-          opacity: 0;
-          max-height: 0;
-          transform: translateY(-10px);
-        }
-        to {
-          opacity: 1;
-          max-height: 1000px;
-          transform: translateY(0);
-        }
-      }
-
-      @keyframes slideUp {
-        from {
-          opacity: 1;
-          max-height: 1000px;
-          transform: translateY(0);
-        }
-        to {
-          opacity: 0;
-          max-height: 0;
-          transform: translateY(-10px);
-        }
-      }
-
       .pulse {
         animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-      }
-
-      .slide-down {
-        animation: slideDown 0.3s ease-out forwards;
-      }
-
-      .slide-up {
-        animation: slideUp 0.3s ease-out forwards;
       }
 
       .collapsible-content {
@@ -167,7 +133,7 @@
   <body
     class="bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 text-white min-h-screen"
   >
-    <!-- Compact Header -->
+    <!-- Header -->
     <nav class="glass sticky top-0 z-50 border-b border-gray-700/50">
       <div class="container mx-auto px-4 py-3">
         <div class="flex items-center justify-between">
@@ -175,13 +141,18 @@
             class="text-xl font-bold bg-gradient-to-r from-blue-400 via-purple-400 to-cyan-400 bg-clip-text text-transparent"
           >
             <i class="fas fa-brain mr-2"></i>AI Trading Bot
+            <span
+              id="trading-mode-indicator"
+              class="ml-3 text-sm font-bold text-red-400"
+            >
+              <i class="fas fa-exclamation-triangle mr-1"></i>LIVE MODE
+            </span>
           </h1>
 
-          <!-- Compact Status Indicators -->
           <div class="flex items-center space-x-4">
             <div class="hidden md:flex items-center space-x-3 text-xs">
               <span class="flex items-center text-gray-300">
-                <i class="fas fa-bolt text-yellow-400 mr-1"></i>Advanced
+                <i class="fas fa-bolt text-yellow-400 mr-1"></i>Real Trading
               </span>
               <span class="flex items-center text-gray-300">
                 <i class="fas fa-chart-line text-green-400 mr-1"></i>Multi-TF
@@ -201,15 +172,13 @@
     </nav>
 
     <div class="container mx-auto px-4 py-6 space-y-6">
-      <!-- Compact Portfolio Summary -->
+      <!-- Portfolio Summary -->
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div class="compact-card rounded-xl p-4 hover-lift">
           <div class="flex items-center justify-between">
             <div>
               <p class="text-gray-400 text-xs mb-1">Portfolio</p>
-              <p class="text-xl font-bold text-white" id="total-value">
-                $1,000.00
-              </p>
+              <p class="text-xl font-bold text-white" id="total-value">$0.00</p>
             </div>
             <div
               class="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg flex items-center justify-center"
@@ -222,13 +191,13 @@
         <div class="compact-card rounded-xl p-4 hover-lift">
           <div class="flex items-center justify-between">
             <div>
-              <p class="text-gray-400 text-xs mb-1">P&L</p>
-              <p class="text-xl font-bold" id="total-pnl">$0.00</p>
+              <p class="text-gray-400 text-xs mb-1">Balance</p>
+              <p class="text-xl font-bold text-white" id="balance">$0.00</p>
             </div>
             <div
               class="w-10 h-10 bg-gradient-to-br from-green-500 to-green-600 rounded-lg flex items-center justify-center"
             >
-              <i class="fas fa-chart-line text-white text-sm"></i>
+              <i class="fas fa-dollar-sign text-white text-sm"></i>
             </div>
           </div>
         </div>
@@ -363,7 +332,7 @@
           <span
             class="text-xs text-gray-400 bg-gradient-to-r from-blue-600/20 to-purple-600/20 px-3 py-1 rounded-full border border-blue-500/30"
           >
-            Dynamic Risk Management
+            Real Binance Futures
           </span>
         </div>
 
@@ -387,25 +356,16 @@
                   P&L
                 </th>
                 <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Duration
+                  Leverage
                 </th>
                 <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Stop Loss
-                </th>
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Take Profit
-                </th>
-                <th class="text-center py-2 px-3 text-gray-400 font-medium">
-                  Confidence
-                </th>
-                <th class="text-center py-2 px-3 text-gray-400 font-medium">
-                  Regime
+                  Notional
                 </th>
               </tr>
             </thead>
             <tbody id="positions-body">
               <tr>
-                <td colspan="10" class="text-center py-12 text-gray-400">
+                <td colspan="7" class="text-center py-12 text-gray-400">
                   <div class="flex flex-col items-center">
                     <i class="fas fa-inbox text-3xl mb-3 opacity-50"></i>
                     <span class="text-sm">No active positions</span>
@@ -421,12 +381,12 @@
       <div class="compact-card rounded-xl p-5 hover-lift">
         <div class="flex items-center justify-between mb-4">
           <h2 class="text-lg font-bold text-blue-400 flex items-center">
-            <i class="fas fa-history mr-2"></i>Recent Trades
+            <i class="fas fa-history mr-2"></i>Trade History
           </h2>
           <span
             class="text-xs text-gray-400 bg-gradient-to-r from-green-600/20 to-blue-600/20 px-3 py-1 rounded-full border border-green-500/30"
           >
-            Risk/Reward Analysis
+            Recent 20 Trades
           </span>
         </div>
 
@@ -438,7 +398,7 @@
                   Time
                 </th>
                 <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Asset
+                  Coin
                 </th>
                 <th class="text-left py-2 px-3 text-gray-400 font-medium">
                   Action
@@ -450,19 +410,16 @@
                   Size
                 </th>
                 <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Notional
+                  Leverage
                 </th>
                 <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  P&L
-                </th>
-                <th class="text-center py-2 px-3 text-gray-400 font-medium">
-                  R:R
+                  Confidence
                 </th>
               </tr>
             </thead>
             <tbody id="trades-body">
               <tr>
-                <td colspan="8" class="text-center py-12 text-gray-400">
+                <td colspan="7" class="text-center py-12 text-gray-400">
                   <div class="flex flex-col items-center">
                     <i class="fas fa-chart-line text-3xl mb-3 opacity-50"></i>
                     <span class="text-sm"
@@ -489,11 +446,11 @@
           </div>
           <div class="text-center bg-gray-700/30 rounded-lg p-3">
             <p class="text-xs text-gray-400 mb-1">Full Analysis</p>
-            <p class="text-lg font-bold text-blue-400">2m</p>
+            <p class="text-lg font-bold text-blue-400">3m</p>
           </div>
           <div class="text-center bg-gray-700/30 rounded-lg p-3">
             <p class="text-xs text-gray-400 mb-1">Max Positions</p>
-            <p class="text-lg font-bold text-yellow-400">4</p>
+            <p class="text-lg font-bold text-yellow-400">6</p>
           </div>
           <div class="text-center bg-gray-700/30 rounded-lg p-3">
             <p class="text-xs text-gray-400 mb-1">Min Confidence</p>
@@ -504,15 +461,15 @@
         <div class="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
           <div class="flex items-center text-gray-300">
             <span class="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
-            Volume Profile
+            AI Memory System
           </div>
           <div class="flex items-center text-gray-300">
             <span class="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
-            S/R Detection
+            Smart Profit Taking
           </div>
           <div class="flex items-center text-gray-300">
             <span class="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
-            Market Regime
+            Market Regime Detection
           </div>
           <div class="flex items-center text-gray-300">
             <span class="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
@@ -520,27 +477,22 @@
           </div>
           <div class="flex items-center text-gray-300">
             <span class="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
-            Trailing Stops
+            Timeframe Alignment
           </div>
           <div class="flex items-center text-gray-300">
             <span class="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
-            Multi-TF Confluence
+            Real Binance API
           </div>
         </div>
       </div>
     </div>
 
     <script>
-      // Store global data for cost calculation
-      window.data = { total_value: 1000 };
-
       // Initialize toggle functionality
       document.addEventListener("DOMContentLoaded", function () {
         initToggleSwitches();
-        initPortfolioChart();
-        initPerformanceChart();
         fetchData();
-        setInterval(fetchData, 15000);
+        setInterval(fetchData, 15000); // Update every 15 seconds
       });
 
       function initToggleSwitches() {
