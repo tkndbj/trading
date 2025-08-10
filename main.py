@@ -2150,14 +2150,19 @@ def calculate_dynamic_stops(current_price, atr, support_levels, resistance_level
     }
 
 def analyze_timeframe_alignment(multi_tf_data):
-    """Enhanced timeframe alignment analysis for 1h, 4h, 12h, 1d"""
+    """
+    Enhanced timeframe alignment analysis - requires only 2+ timeframes to align
+    Still analyzes all 4 timeframes but is more flexible with alignment requirements
+    """
     if not multi_tf_data:
-        return {'aligned': False, 'score': 0, 'direction': 'neutral', 'signals': {}, 'strength': 0}
+        return {'aligned': False, 'score': 0, 'direction': 'neutral', 'signals': {}, 'strength': 0, 'details': {}}
     
-    alignment_score = 0
+    tf_scores = {}  # Individual timeframe scores
+    tf_directions = {}  # Individual timeframe directions
     signals = {}
     strength_scores = []
     
+    # Analyze each timeframe individually
     for tf, data in multi_tf_data.items():
         if 'closes' in data and len(data['closes']) > 20:
             closes = data['closes']
@@ -2175,64 +2180,141 @@ def analyze_timeframe_alignment(multi_tf_data):
             
             # Scoring for this timeframe
             tf_score = 0
+            tf_direction = 'neutral'
             
-            # Trend alignment
+            # Trend alignment (stronger scoring)
             if sma_short > sma_mid > sma_long:
-                tf_score += 2
-                signals[tf] = 'strong_bullish'
+                tf_score += 3  # Strong bullish
+                tf_direction = 'strong_bullish'
             elif sma_short > sma_mid and sma_mid > sma_long * 0.995:
-                tf_score += 1
-                signals[tf] = 'bullish'
+                tf_score += 2  # Bullish
+                tf_direction = 'bullish'
+            elif sma_short > sma_mid:
+                tf_score += 1  # Weak bullish
+                tf_direction = 'weak_bullish'
             elif sma_short < sma_mid < sma_long:
-                tf_score -= 2
-                signals[tf] = 'strong_bearish'
+                tf_score -= 3  # Strong bearish
+                tf_direction = 'strong_bearish'
             elif sma_short < sma_mid and sma_mid < sma_long * 1.005:
-                tf_score -= 1
-                signals[tf] = 'bearish'
+                tf_score -= 2  # Bearish
+                tf_direction = 'bearish'
+            elif sma_short < sma_mid:
+                tf_score -= 1  # Weak bearish
+                tf_direction = 'weak_bearish'
             else:
-                signals[tf] = 'neutral'
+                tf_direction = 'neutral'
             
-            # RSI confirmation
+            # RSI confirmation (bonus points)
             if rsi > 60 and tf_score > 0:
                 tf_score += 0.5
             elif rsi < 40 and tf_score < 0:
                 tf_score -= 0.5
+            elif 40 <= rsi <= 60:
+                # Neutral RSI doesn't add or subtract
+                pass
             
-            # MACD confirmation
+            # MACD confirmation (bonus points)
             if macd_data['histogram'] > 0 and tf_score > 0:
                 tf_score += 0.5
             elif macd_data['histogram'] < 0 and tf_score < 0:
                 tf_score -= 0.5
             
-            alignment_score += tf_score
+            # Store results
+            tf_scores[tf] = tf_score
+            tf_directions[tf] = tf_direction
+            signals[tf] = {
+                'direction': tf_direction,
+                'score': tf_score,
+                'rsi': rsi,
+                'macd_histogram': macd_data['histogram'],
+                'sma_alignment': 'bullish' if sma_short > sma_mid > sma_long else 'bearish' if sma_short < sma_mid < sma_long else 'mixed'
+            }
             strength_scores.append(abs(tf_score))
+    
+    # NEW FLEXIBLE ALIGNMENT LOGIC
+    # Count timeframes by direction
+    bullish_tfs = []
+    bearish_tfs = []
+    neutral_tfs = []
+    
+    for tf, direction in tf_directions.items():
+        if 'bullish' in direction:
+            bullish_tfs.append(tf)
+        elif 'bearish' in direction:
+            bearish_tfs.append(tf)
+        else:
+            neutral_tfs.append(tf)
+    
+    # Calculate alignment based on majority and strength
+    total_tfs = len(tf_scores)
+    bullish_count = len(bullish_tfs)
+    bearish_count = len(bearish_tfs)
+    
+    # Alignment criteria: Need at least 2 timeframes agreeing
+    aligned = False
+    overall_direction = 'mixed'
+    alignment_strength = 0
+    
+    if bullish_count >= 2:
+        aligned = True
+        if bullish_count >= 3:
+            overall_direction = 'strong_bullish'
+            alignment_strength = bullish_count / total_tfs
+        else:
+            overall_direction = 'bullish'
+            alignment_strength = bullish_count / total_tfs
+    elif bearish_count >= 2:
+        aligned = True
+        if bearish_count >= 3:
+            overall_direction = 'strong_bearish'
+            alignment_strength = bearish_count / total_tfs
+        else:
+            overall_direction = 'bearish'
+            alignment_strength = bearish_count / total_tfs
+    else:
+        # No clear alignment - mixed signals
+        overall_direction = 'mixed'
+        aligned = False
+        alignment_strength = 0
+    
+    # Calculate weighted score (emphasize higher timeframes)
+    tf_weights = {'1d': 3, '12h': 2.5, '4h': 2, '1h': 1}
+    weighted_score = 0
+    total_weight = 0
+    
+    for tf, score in tf_scores.items():
+        weight = tf_weights.get(tf, 1)
+        weighted_score += score * weight
+        total_weight += weight
+    
+    final_score = weighted_score / total_weight if total_weight > 0 else 0
     
     # Calculate overall strength
     avg_strength = sum(strength_scores) / len(strength_scores) if strength_scores else 0
     
-    # Determine overall direction with higher thresholds
-    if alignment_score >= 4:
-        direction = 'strong_bullish'
-        aligned = True
-    elif alignment_score >= 2:
-        direction = 'bullish'
-        aligned = True
-    elif alignment_score <= -4:
-        direction = 'strong_bearish'
-        aligned = True
-    elif alignment_score <= -2:
-        direction = 'bearish'
-        aligned = True
-    else:
-        direction = 'mixed'
-        aligned = False
+    # Enhanced details for debugging
+    alignment_details = {
+        'timeframe_count': total_tfs,
+        'bullish_timeframes': bullish_tfs,
+        'bearish_timeframes': bearish_tfs,
+        'neutral_timeframes': neutral_tfs,
+        'bullish_count': bullish_count,
+        'bearish_count': bearish_count,
+        'weighted_score': weighted_score,
+        'individual_scores': tf_scores,
+        'individual_directions': tf_directions,
+        'alignment_threshold_met': aligned,
+        'dominant_direction': overall_direction
+    }
     
     return {
         'aligned': aligned,
-        'direction': direction,
-        'score': alignment_score,
+        'direction': overall_direction,
+        'score': final_score,
         'signals': signals,
-        'strength': avg_strength
+        'strength': avg_strength,
+        'alignment_strength': alignment_strength,
+        'details': alignment_details
     }
 
 def calculate_rsi(prices, period=14):
@@ -2438,9 +2520,30 @@ def ai_trade_decision_with_memory(coin, market_data, multi_tf_data, learning_ins
     current_price = market_data[coin]['price']
     tf_alignment = analyze_timeframe_alignment(multi_tf_data)
     
-    # Skip if timeframes not aligned
-    if not tf_alignment['aligned']:
-        return {'direction': 'SKIP', 'reason': 'Timeframes not aligned'}
+    if not tf_alignment['aligned'] and tf_alignment['direction'] == 'mixed':
+        # Still allow trade if we have strong signals from key timeframes
+        key_timeframes = ['4h', '1d']  # Focus on higher timeframes
+        key_signals = {tf: tf_alignment['signals'].get(tf, {}) for tf in key_timeframes if tf in tf_alignment['signals']}
+        
+        if key_signals:
+            # Check if key timeframes are aligned
+            key_directions = [signal.get('direction', 'neutral') for signal in key_signals.values()]
+            key_bullish = sum(1 for d in key_directions if 'bullish' in d)
+            key_bearish = sum(1 for d in key_directions if 'bearish' in d)
+            
+            if key_bullish >= 1 and key_bearish == 0:
+                print(f"   💡 {coin}: Key timeframes aligned bullish, proceeding despite mixed overall")
+                tf_alignment['aligned'] = True
+                tf_alignment['direction'] = 'bullish'
+            elif key_bearish >= 1 and key_bullish == 0:
+                print(f"   💡 {coin}: Key timeframes aligned bearish, proceeding despite mixed overall")
+                tf_alignment['aligned'] = True
+                tf_alignment['direction'] = 'bearish'
+            else:
+                print(f"   ⏭️ {coin}: No timeframe alignment ({tf_alignment['details']['bullish_count']}B/{tf_alignment['details']['bearish_count']}B/{tf_alignment['details']['neutral_timeframes']}N)")
+                return {'direction': 'SKIP', 'reason': 'No timeframe alignment', 'debug': tf_alignment['details']}
+        else:
+            return {'direction': 'SKIP', 'reason': 'Insufficient timeframe data'}
     
     # Calculate advanced technical indicators
     hourly_data = multi_tf_data.get('1h', {})
@@ -2637,6 +2740,9 @@ Provide decision with high confidence only when multiple technical factors align
     trade_params['atr'] = atr
     trade_params['pattern_recommendations'] = pattern_recommendations
     trade_params['technical_indicators'] = indicators
+    if 'trade_params' in locals():
+        trade_params['tf_alignment'] = tf_alignment
+        trade_params['tf_details'] = tf_alignment['details']
     
     return trade_params
 
