@@ -160,10 +160,18 @@ function updateTradingModeIndicator(data) {
 }
 
 function updateSummaryCards(data) {
-  // Use dynamic data from API
-  const initialBalance = data.initial_balance || 1000;
-  const currentBalance = data.current_balance || initialBalance;
-  const totalValue = data.total_value || currentBalance;
+  // Validate real data is present
+  if (!data.current_balance && data.trading_mode === "REAL") {
+    console.error("CRITICAL: No real balance data received from API!");
+    document.querySelector(".connection-status").innerHTML =
+      '<span class="status-dot status-offline"></span><span class="text-red-400 font-medium">SYNC ERROR</span>';
+    return;
+  }
+
+  // ✅ REMOVE ALL HARDCODED FALLBACKS
+  const initialBalance = data.initial_balance; // No || 1000
+  const currentBalance = data.current_balance; // No fallback
+  const totalValue = data.total_value;
   const totalPnl = data.total_pnl || 0;
   const totalPnlPercent = data.total_pnl_percent || 0;
   const realizedPnl = data.realized_pnl || 0;
