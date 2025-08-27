@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_DOWN
 import requests
 import numpy as np
 from flask import Flask, jsonify, send_from_directory
+import random
 
 # ============== OpenAI (opsiyonel) ==============
 try:
@@ -111,10 +112,13 @@ def meets_min_notional(sym, price_float, qty_float):
 
 # ============== Portföy & sabitler ==============
 QUICK_CHECK_INTERVAL = 15
-MAX_CONCURRENT_POSITIONS = 6
+MAX_CONCURRENT_POSITIONS = 8
 MIN_CONFIDENCE_THRESHOLD = 6
 
-POSITION_SCALING = {0:0.15,1:0.12,2:0.10,3:0.08,4:0.06,5:0.05}
+POSITION_SCALING = {
+    0:0.20, 1:0.17, 2:0.14, 3:0.12,
+    4:0.10, 5:0.08, 6:0.07, 7:0.06
+}
 
 FACTOR_WEIGHTS = {
     "timeframe_alignment": 0.25,
@@ -237,6 +241,15 @@ def init_database():
         api_calls INTEGER DEFAULT 0,
         trades_executed INTEGER DEFAULT 0,
         positions_checked INTEGER DEFAULT 0
+    );
+    -- NEW: bandit stats per coin
+    CREATE TABLE IF NOT EXISTS coin_stats (
+        coin TEXT PRIMARY KEY,
+        trades INTEGER DEFAULT 0,
+        wins INTEGER DEFAULT 0,
+        sum_pnl REAL DEFAULT 0,     -- sum of pnl_percent
+        ema_wr REAL DEFAULT 0.5,    -- exponential moving win-rate
+        ema_pnl REAL DEFAULT 0.0    -- exponential moving avg pnl_percent
     );
     """)
     conn.commit()
@@ -637,6 +650,12 @@ def calculate_dynamic_stops(current_price, atr, direction, market_regime):
     elif market_regime in ("TRENDING_UP","TRENDING_DOWN"):
         sl_mult, tp_mult = 1.8, 4.0
 
+    # subtle performance bias (better recent WR -> a bit tighter SL, fatter TP)
+    gl = get_policy_adjustments()["global"]["win_rate"]  # 0..1 fraction
+    bias = (gl - 0.50)  # -0.5..+0.5 -> typical -0.2..+0.2
+    sl_mult *= (1.0 - 0.08 * bias)  # small tighten/loosen
+    tp_mult *= (1.0 + 0.12 * bias)
+
     atr = atr or (current_price*0.005)  # fallback
     atr_sl = atr*sl_mult
     atr_tp = atr*tp_mult
@@ -814,6 +833,66 @@ def get_cost_projections():
                        "monthly":{"openai":monthly_openai,"railway":monthly_rail,"total":monthly_openai+monthly_rail}}
     }
 
+
+def get_hp_value(key, default):
+    row = db_execute("SELECT value FROM hyperparameters WHERE key=?", (key,), fetch=True)
+    try:
+        return float(row[0][0]) if row and row[0] and row[0][0] is not None else default
+    except:
+        return default
+
+def get_realized_pnl_today():
+    rows = db_execute("""
+        SELECT COALESCE(SUM(pnl), 0)
+        FROM trades
+        WHERE action LIKE '%CLOSE%' AND DATE(timestamp) = DATE('now')
+    """, fetch=True)
+    return float(rows[0][0] if rows and rows[0] and rows[0][0] is not None else 0.0)
+
+def update_coin_stats(coin, pnl_percent):
+    # EMA smoothing (keeps the brain “fresh”)
+    alpha = 0.15
+    rows = db_execute("SELECT trades, wins, sum_pnl, ema_wr, ema_pnl FROM coin_stats WHERE coin=?", (coin,), fetch=True)
+    if not rows:
+        db_execute("INSERT INTO coin_stats (coin, trades, wins, sum_pnl, ema_wr, ema_pnl) VALUES (?,?,?,?,?,?)",
+                   (coin, 0, 0, 0.0, 0.5, 0.0))
+        trades = wins = 0; sum_pnl = 0.0; ema_wr = 0.5; ema_pnl = 0.0
+    else:
+        trades, wins, sum_pnl, ema_wr, ema_pnl = rows[0]
+
+    trades += 1
+    wins += 1 if pnl_percent > 0 else 0
+    sum_pnl += float(pnl_percent)
+    wr = wins / max(1, trades)
+    ema_wr = (1 - alpha) * float(ema_wr) + alpha * wr
+    ema_pnl = (1 - alpha) * float(ema_pnl) + alpha * float(pnl_percent)
+
+    db_execute("UPDATE coin_stats SET trades=?, wins=?, sum_pnl=?, ema_wr=?, ema_pnl=? WHERE coin=?",
+               (trades, wins, sum_pnl, ema_wr, ema_pnl, coin))
+
+def rank_candidates_ucb(coin_scores, c=2.0):
+    """
+    coin_scores: list of tuples (coin, score, ana, tf)
+    Returns same list sorted by UCB score (desc), tie-break by |score-50|.
+    """
+    # Total trades to scale exploration
+    trow = db_execute("SELECT COALESCE(SUM(trades),0) FROM coin_stats", fetch=True)
+    total_trades = float(trow[0][0] if trow and trow[0] else 0.0) + 1.0
+
+    out = []
+    for coin, score, ana, tf in coin_scores:
+        row = db_execute("SELECT trades, ema_pnl FROM coin_stats WHERE coin=?", (coin,), fetch=True)
+        if row:
+            n_i, ema_p = float(row[0][0] or 0.0), float(row[0][1] or 0.0)
+        else:
+            n_i, ema_p = 0.0, 0.0
+        # UCB on pnl% (scaled). More trades → smaller explore term.
+        explore = c * math.sqrt(math.log(total_trades) / max(1.0, n_i))
+        ucb = ema_p + explore
+        out.append((ucb, coin, score, ana, tf))
+    out.sort(key=lambda x: (x[0], abs(x[2] - 50)), reverse=True)
+    return [(coin, score, ana, tf) for (_ucb, coin, score, ana, tf) in out]
+
 # ============== Öğrenme / risk ==============
 def get_learning_insights():
     insights={}
@@ -832,41 +911,138 @@ def get_learning_insights():
     insights["avg_loss"] = avgl or 0
     return insights
 
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+def get_policy_adjustments():
+    """
+    Builds tiny, safe adjustments from recent outcomes:
+      - global thresholds (bullish/bearish) move ±3 max
+      - per-coin score bias ±3 max
+      - per-coin size/leverage multipliers within tight bounds
+    """
+    rows = db_execute("""
+        SELECT coin, outcome_pnl
+        FROM ai_decisions
+        WHERE outcome_pnl IS NOT NULL
+        ORDER BY timestamp DESC
+        LIMIT 500
+    """, fetch=True) or []
+
+    # Global stats
+    total = len(rows)
+    wins = sum(1 for _, pnl in rows if (pnl or 0) > 0)
+    global_wr = (wins / total) if total else 0.5
+
+    # Dynamic thresholds (stay aggressive: bigger downshift when doing well; tiny upshift when doing poorly)
+    # Base: 65/35  -> Adjust: (-3..+2)
+    shift = clamp((global_wr - 0.50) * 10.0, -3.0, 2.0)
+    bullish_thr = 65.0 - shift      # higher WR => slightly lower gate
+    bearish_thr = 35.0 + shift      # higher WR => slightly lower (more aggressive) short gate too
+
+    # Per-coin aggregates
+    per = {}
+    for coin, pnl in rows:
+        if coin not in per:
+            per[coin] = {"n": 0, "wins": 0, "sum_pnl": 0.0}
+        per[coin]["n"] += 1
+        per[coin]["wins"] += 1 if (pnl or 0) > 0 else 0
+        per[coin]["sum_pnl"] += float(pnl or 0.0)
+
+    per_coin = {}
+    for coin, st in per.items():
+        n = st["n"]
+        wr = st["wins"] / n if n else 0.5
+        avg_pnl = (st["sum_pnl"] / n) if n else 0.0
+
+        # Score bias: map win-rate to [-3, +3]
+        bias = clamp((wr - 0.5) * 20.0, -3.0, 3.0)
+
+        # Size & leverage multipliers (tight bounds)
+        size_mult = clamp(1.0 + (wr - 0.5) * 0.30, 0.85, 1.15)
+        lev_mult  = clamp(1.0 + (avg_pnl / 100.0) * 0.50, 0.90, 1.20)
+
+        per_coin[coin] = {
+            "bias": bias,
+            "size_mult": size_mult,
+            "lev_mult": lev_mult
+        }
+
+    # Exploration rate (default 10% unless overridden in DB)
+    row = db_execute("SELECT value FROM hyperparameters WHERE key='exploration_rate'", fetch=True)
+    exploration_rate = float(row[0][0]) if row and row[0] and row[0][0] is not None else 0.10
+    exploration_rate = clamp(exploration_rate, 0.00, 0.30)
+
+    return {
+        "global": {
+            "win_rate": global_wr,
+            "bullish_thr": bullish_thr,
+            "bearish_thr": bearish_thr,
+            "exploration_rate": exploration_rate
+        },
+        "per_coin": per_coin
+    }
+
 def calculate_portfolio_risk():
     try:
         positions = get_open_positions()
         balance = get_futures_balance()
         if balance <= 0:
-            return {"can_trade":False,"reason":"No balance available","positions_count":0,"balance":0,"margin_ratio":0,"available_balance":0}
+            return {"can_trade":False,"reason":"No balance available","positions_count":0,"balance":0,
+                    "margin_ratio":0,"available_balance":0, "can_trade_long":False,"can_trade_short":False}
+
         total_notional = sum(p["notional"] for p in positions.values())
         total_margin   = sum(p["notional"]/p["leverage"] for p in positions.values())
         margin_ratio = total_margin / balance if balance>0 else 0
         available = balance - total_margin
-        out = {"positions_count":len(positions),"total_notional":total_notional,"total_margin_used":total_margin,
+
+        # Directional exposure
+        long_notional  = sum(p["notional"] for p in positions.values() if p["direction"]=="LONG")
+        short_notional = sum(p["notional"] for p in positions.values() if p["direction"]=="SHORT")
+        max_dir_x = get_hp_value("max_directional_exposure_x", 6.0)  # e.g., 6x of balance per direction
+        can_long  = (long_notional / max(1e-9, balance))  < max_dir_x
+        can_short = (short_notional / max(1e-9, balance)) < max_dir_x
+
+        # Daily loss breaker
+        max_dd_pct = get_hp_value("max_daily_loss_pct", 8.0)  # ~aggressive but safe-ish
+        realized_today = get_realized_pnl_today()
+        dd_hit = (realized_today <= -abs(max_dd_pct) * balance / 100.0)
+
+        out = {"positions_count":len(positions),
+               "total_notional":total_notional,"total_margin_used":total_margin,
                "balance":balance,"margin_ratio":margin_ratio,"available_balance":available,
-               "max_positions":MAX_CONCURRENT_POSITIONS,"can_trade":True,"reason":"Good to trade"}
+               "max_positions":MAX_CONCURRENT_POSITIONS,
+               "can_trade":True,"reason":"Good to trade",
+               "can_trade_long":can_long and not dd_hit,
+               "can_trade_short":can_short and not dd_hit,
+               "realized_today":realized_today}
+
         if len(positions) >= MAX_CONCURRENT_POSITIONS:
             out["can_trade"]=False; out["reason"]=f"Maximum positions reached ({len(positions)}/{MAX_CONCURRENT_POSITIONS})"
-        elif margin_ratio > 0.8:
+        elif margin_ratio > 0.9:
             out["can_trade"]=False; out["reason"]=f"High margin utilization ({margin_ratio*100:.1f}%)"
         elif available < 5:
             out["can_trade"]=False; out["reason"]=f"Insufficient available balance (${available:.2f})"
+        elif dd_hit:
+            out["can_trade"]=False; out["reason"]=f"Daily loss breaker hit (PnL today {realized_today:.2f})"
+
         return out
     except Exception as e:
         print(f"Risk error: {e}")
-        return {"can_trade":False,"reason":f"Risk calculation error: {e}"}
+        return {"can_trade":False,"reason":f"Risk calculation error: {e}","can_trade_long":False,"can_trade_short":False}
+
 
 def get_dynamic_position_size(current_positions_count, confidence_score, balance):
     try:
         base = POSITION_SCALING.get(current_positions_count, 0.04)
-        conf_mult = 0.7 + (confidence_score - 6)*0.075  # 6..10 -> 0.7..1.0
+        conf_mult = 0.8 + (confidence_score - 6)*0.09
         positions = get_open_positions()
         used_margin = sum(p["notional"]/p["leverage"] for p in positions.values())
         available = balance - used_margin
-        max_val = available * 0.9
+        max_val = available * 0.99
         target_val = balance * base * conf_mult
-        final_size = min(target_val, max_val) / balance if balance>0 else 0.05
-        final_size = max(0.03, min(0.15, final_size))
+        final_size = min(target_val, max_val) / balance if balance>0 else 0.07
+        final_size = max(0.04, min(0.22, final_size))
         return {"position_size":final_size,"base_size":base,"confidence_multiplier":conf_mult,
                 "available_balance":available,"position_value":balance*final_size}
     except Exception as e:
@@ -875,164 +1051,168 @@ def get_dynamic_position_size(current_positions_count, confidence_score, balance
 
 # ============== AI karar ==============
 def ai_trade_decision(coin, market_data, multi_tf_data, learning_insights):
-    if not client:
-        return None
-    current_price = market_data[coin]["price"]
-    symbol = f"{coin}USDT"
-    analysis = get_comprehensive_analysis(symbol, market_data, multi_tf_data)
-    if 40 <= analysis["overall_score"] <= 60:
-        return {"direction":"SKIP","reason":"Market conditions too neutral"}
-
-    hourly = multi_tf_data.get("1h",{})
-    atr = 0
-    if all(k in hourly for k in ("highs","lows","closes")):
-        atr = calculate_atr(hourly["highs"], hourly["lows"], hourly["closes"])
-    mreg = analysis["factors"]["market_regime"]["details"]
-    dyn = calculate_dynamic_stops(current_price, atr, "LONG" if analysis["direction"]=="bullish" else "SHORT", mreg["regime"])
-
-    ai_context = get_ai_context_memory()
-    factor_summary = "WEIGHTED FACTOR ANALYSIS:\n"
-    for name, dat in analysis["factors"].items():
-        w = dat["weight"]*100
-        contrib = dat["score"]*dat["weight"]
-        factor_summary += f"• {name.upper()}: {dat['score']:.0f}/100 (Weight: {w:.0f}%) = {contrib:.1f}\n"
-    factor_summary += f"\nOVERALL SCORE: {analysis['overall_score']:.1f}/100\nDIRECTION: {analysis['direction'].upper()} (Conf:{analysis['confidence']}/10)\n"
-
-    prompt = f"""
-{ai_context}
-
----
-
-{coin} COMPREHENSIVE MARKET ANALYSIS
-
-PRICE DATA:
-- Current: ${current_price:.2f}
-- 24h Change: {market_data[coin]['change_24h']:+.1f}%
-- Volume: {market_data[coin]['volume']/1_000_000:.1f}M
-
-{factor_summary}
-
-KEY INSIGHTS:
-- Market Regime: {mreg['regime']} ({mreg['confidence']:.0f}% confidence)
-- Momentum: {analysis['factors']['momentum']['direction']} ({analysis['factors']['momentum']['score']:.0f}/100)
-- Volume Trend: {analysis['factors']['volume_profile']['trend']}
-- Liquidity Score: {analysis['factors']['liquidity']['score']:.0f}/100
-
-RISK MANAGEMENT:
-- Suggested SL: {dyn['sl_percentage']:.1f}%
-- Suggested TP: {dyn['tp_percentage']:.1f}%
-- Risk/Reward: 1:{dyn['risk_reward']:.1f}
-- ATR: ${atr:.2f}
-
-TRADING RULES:
-1. Only trade when weighted score > 65 (bullish) or < 35 (bearish)
-2. Require at least 2:1 risk/reward ratio
-3. Confidence should reflect score strength
-4. Higher confidence -> higher leverage (10-30x)
-5. Position size 5-15% based on confidence & volatility
-
-Provide:
-DECISION: [LONG/SHORT/SKIP]
-LEVERAGE: [10-30]
-SIZE: [5-15]%
-CONFIDENCE: [1-10]
-REASON: [short]
-"""
+    """
+    Deterministic trade planner:
+      - Uses get_comprehensive_analysis and calculate_dynamic_stops
+      - Converts score -> direction, confidence, leverage, base size
+      - Enforces RR >= 1.7
+      - Returns the same shape your pipeline expects
+    """
     try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role":"user","content":prompt}],
-            max_tokens=200, temperature=0.3
-        )
-        track_cost("openai", 0.00012, "500")
-        txt = resp.choices[0].message.content.strip()
-        tp = {}
-        for line in txt.splitlines():
-            if ":" not in line: continue
-            k,v = line.split(":",1); k=k.strip().upper(); v=v.strip()
-            if "DECISION" in k: tp["direction"]=v.upper()
-            elif "LEVERAGE" in k:
-                n = "".join(ch for ch in v if ch.isdigit())
-                tp["leverage"] = min(30, max(10, int(n) if n else 15))
-            elif "SIZE" in k:
-                s = "".join(ch for ch in v if (ch.isdigit() or ch=='.'))
-                if s:
-                    pct = float(s)
-                    tp["position_size"] = min(0.15, max(0.05, pct/100))
-            elif "CONFIDENCE" in k:
-                n = "".join(ch for ch in v if ch.isdigit())
-                tp["confidence"] = min(10, max(1, int(n) if n else 5))
-            elif "REASON" in k:
-                tp["reasoning"] = v[:200]
-        # eklemeler
-        tp["stop_loss"]=dyn["stop_loss"]; tp["take_profit"]=dyn["take_profit"]
-        tp["sl_percentage"]=dyn["sl_percentage"]; tp["tp_percentage"]=dyn["tp_percentage"]
-        tp["market_regime"]=mreg["regime"]; tp["atr"]=atr
-        tp["overall_score"]=analysis["overall_score"]; tp["analysis_direction"]=analysis["direction"]
-        if "direction" not in tp: tp["direction"]="SKIP"
-        if "leverage" not in tp:
-            tp["leverage"] = 25 if analysis["overall_score"]>75 else 20 if analysis["overall_score"]>65 else 15
-        if "confidence" not in tp: tp["confidence"]=analysis["confidence"]
-        if "position_size" not in tp:
-            positions = get_open_positions()
-            bal = get_futures_balance()
-            sizing = get_dynamic_position_size(len(positions), analysis["confidence"], bal)
-            tp["position_size"] = sizing["position_size"]
-        if "reasoning" not in tp:
-            top = sorted(analysis["factors"].items(), key=lambda x: x[1]["score"]*x[1]["weight"], reverse=True)[:2]
-            tp["reasoning"] = "Top factors: " + ", ".join([f[0] for f in top])
-        return tp
-    except Exception as e:
-        print(f"AI Error: {e}")
-        return None
+        current_price = market_data[coin]["price"]
+        symbol = f"{coin}USDT"
 
-def execute_real_trade(coin, trade_params, current_price):
+        # 1) Core analysis
+        ana = get_comprehensive_analysis(symbol, market_data, multi_tf_data)
+        score = float(ana.get("overall_score", 50.0))
+        dir_hint = ana.get("direction", "neutral")
+
+        # Map score → direction
+        if score >= 65:
+            direction = "LONG"
+        elif score <= 35:
+            direction = "SHORT"
+        else:
+            return {"direction": "SKIP", "reason": "Market conditions too neutral"}
+
+        # 2) ATR & regime-aware stops
+        hourly = multi_tf_data.get("1h", {})
+        atr = 0.0
+        if all(k in hourly for k in ("highs", "lows", "closes")):
+            atr = calculate_atr(hourly["highs"], hourly["lows"], hourly["closes"])
+
+        mreg = ana["factors"]["market_regime"]["details"]
+        dyn = calculate_dynamic_stops(
+            current_price,
+            atr,
+            "LONG" if direction == "LONG" else "SHORT",
+            mreg.get("regime", "UNKNOWN")
+        )
+
+        # 3) Quick sanity checks (skip illiquid/odd scenarios)
+        liq_score = ana["factors"].get("liquidity", {}).get("score", 50)
+        if liq_score < 5:
+            return {"direction": "SKIP", "reason": "Liquidity extremely low"}
+
+        # 4) Require decent risk/reward
+        rr = float(dyn["tp_percentage"]) / max(1e-6, float(dyn["sl_percentage"]))
+        if rr < 1.7:
+            return {"direction": "SKIP", "reason": f"RR {rr:.1f} < 1.7"}
+
+        # 5) Confidence from score distance to 50
+        #    65→~6, 75→~8, 85→~10  (mirrors for shorts)
+        dist = abs(score - 50.0)
+        # base: start at 6 when just over the gate, ramp to 10 at 85+
+        confidence = 6 + int(max(0.0, (dist - 15.0)) // 5.0)
+        confidence = int(max(6, min(10, confidence)))
+
+        # If multi-timeframe alignment is "strong_*", nudge confidence +1
+        tf_details = ana["factors"].get("timeframe_alignment", {}).get("details", {})
+        if isinstance(tf_details, dict) and str(tf_details.get("direction", "")).startswith("strong_"):
+            confidence = min(10, confidence + 1)
+
+        # 6) Regime-aware base leverage (final lev/size still refined in execute_real_trade)
+        reg = mreg.get("regime", "TRANSITIONAL")
+        base_lev = 15 + (confidence - 6) * 3  # 15..30
+        reg_boost = {"TRENDING_UP": 1.10, "TRENDING_DOWN": 1.10, "RANGING": 0.96, "TRANSITIONAL": 1.00}.get(reg, 1.00)
+        leverage = int(max(10, min(30, round(base_lev * reg_boost))))
+
+        # 7) Base position size 5–15% from confidence (exact $ sized later)
+        base_size = 0.05 + (confidence - 6) * 0.02   # 0.05..0.15
+        base_size = float(max(0.05, min(0.15, base_size)))
+
+        # 8) Reason string (short but informative)
+        top = sorted(
+            ana["factors"].items(),
+            key=lambda kv: kv[1].get("score", 0) * kv[1].get("weight", 0),
+            reverse=True
+        )[:2]
+        top_names = ", ".join([k for k, _ in top]) if top else "n/a"
+        reasoning = (
+            f"Score {score:.1f} → {direction} | Regime {reg} | "
+            f"RR~1:{rr:.1f} | Top factors: {top_names}"
+        )
+
+        # 9) Package result
+        return {
+            "direction": direction,
+            "leverage": leverage,
+            "position_size": base_size,          # execute_real_trade will still call get_dynamic_position_size
+            "confidence": confidence,
+            "reasoning": reasoning,
+            "stop_loss": float(dyn["stop_loss"]),
+            "take_profit": float(dyn["take_profit"]),
+            "sl_percentage": float(dyn["sl_percentage"]),  # in %
+            "tp_percentage": float(dyn["tp_percentage"]),  # in %
+            "market_regime": reg,
+            "atr": float(atr),
+            "overall_score": float(score),
+            "analysis_direction": dir_hint,
+        }
+
+    except Exception as e:
+        print(f"AI(plan) error: {e}")
+        return {"direction": "SKIP", "reason": f"Planner exception: {e}"}
+
+
+def execute_real_trade(coin, trade_params, current_price,
+                       bullish_thr=65.0, bearish_thr=35.0,
+                       size_mult=1.0, lev_mult=1.0, score_bias=0.0):
     if trade_params["direction"] == "SKIP":
         return False
     try:
         symbol = f"{coin}USDT"
 
-        # Score gates
-        score = trade_params.get("overall_score", 50)
-        if trade_params["direction"] == "LONG" and score < 65:
-            print("Reject LONG: score < 65")
+        # Use biased score for gating
+        base_score = trade_params.get("overall_score", 50.0)
+        score = base_score + float(score_bias or 0.0)
+
+        if trade_params["direction"] == "LONG" and score < bullish_thr:
+            print(f"Reject LONG: score {score:.1f} < gate {bullish_thr:.1f}")
             return False
-        if trade_params["direction"] == "SHORT" and score > 35:
-            print("Reject SHORT: score > 35")
+        if trade_params["direction"] == "SHORT" and score > bearish_thr:
+            print(f"Reject SHORT: score {score:.1f} > gate {bearish_thr:.1f}")
             return False
 
-        # Portfolio/risk
+        # Portfolio/risk (directional caps + daily breaker)
         prisk = calculate_portfolio_risk()
         if not prisk["can_trade"]:
             print(f"❌ Cannot trade: {prisk['reason']}")
             return False
+        if trade_params["direction"] == "LONG" and not prisk.get("can_trade_long", True):
+            print("❌ Directional cap: cannot open more LONG exposure right now")
+            return False
+        if trade_params["direction"] == "SHORT" and not prisk.get("can_trade_short", True):
+            print("❌ Directional cap: cannot open more SHORT exposure right now")
+            return False
+
         balance = prisk["balance"]
         current_positions = get_open_positions()
 
-        # Sizing
+        # Sizing (apply multipliers)
         sizing = get_dynamic_position_size(len(current_positions), trade_params["confidence"], balance)
-        position_value = sizing["position_value"]
-        leverage = trade_params["leverage"]
+        position_value = sizing["position_value"] * float(size_mult or 1.0)
 
-        # Qty/notional
+        # Leverage (apply multiplier)
+        leverage = int(round(clamp(trade_params["leverage"] * float(lev_mult or 1.0), 10, 30)))
+
+        # Qty / notional
         notional = position_value * leverage
-        qty = notional / current_price
-        qty = q_qty(symbol, qty)
+        qty = q_qty(symbol, notional / current_price)
         if qty <= 0:
             print("❌ Qty rounded to zero")
             return False
 
-        # minNotional check (with fallback)
-        min_notional = _symbol_info.get(symbol, {}).get("minNotional")
-        if min_notional is None:
-            min_notional = Decimal("5")
+        # minNotional check
+        min_notional = _symbol_info.get(symbol, {}).get("minNotional", Decimal("5"))
         computed_notional = Decimal(str(current_price)) * Decimal(str(qty))
         if computed_notional < min_notional:
             print(f"❌ Below MIN_NOTIONAL: notional={float(computed_notional):.4f} < {float(min_notional):.4f}")
             return False
 
         print(f"📊 Opening #{len(current_positions)+1}: {trade_params['direction']} {coin} "
-              f"| qty={qty} | price≈{current_price:.6f} | notional≈{float(computed_notional):.2f} | lev={leverage}x")
+              f"| qty={qty} | price≈{current_price:.6f} | notional≈{float(computed_notional):.2f} "
+              f"| lev={leverage}x | score={score:.1f} (base {base_score:.1f} + bias {score_bias:+.1f})")
 
         # Place market order
         side = "BUY" if trade_params["direction"] == "LONG" else "SELL"
@@ -1041,10 +1221,17 @@ def execute_real_trade(coin, trade_params, current_price):
             print(f"❌ Order failed for {symbol}")
             return False
 
-        # Place SL/TP (reduceOnly, MARK_PRICE)
-        set_stop_loss_take_profit(symbol, trade_params["stop_loss"], trade_params["take_profit"], trade_params["direction"])
+        # Place SL/TP (reduceOnly, MARK_PRICE) + fail-safe
+        sltp = set_stop_loss_take_profit(symbol, trade_params["stop_loss"], trade_params["take_profit"], trade_params["direction"])
+        if not sltp or not sltp.get("stop_loss") or not sltp.get("take_profit"):
+            print("⚠️ SL/TP placement failed, retrying once...")
+            sltp = set_stop_loss_take_profit(symbol, trade_params["stop_loss"], trade_params["take_profit"], trade_params["direction"])
+            if not sltp or not sltp.get("stop_loss") or not sltp.get("take_profit"):
+                print("❌ SL/TP failed twice — closing immediately to avoid naked exposure.")
+                close_futures_position(symbol)
+                return False
 
-        # Save AI decision & trade row
+        # Save AI decision & trade row (OPEN)
         save_ai_decision(coin, trade_params)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         pid = f"{symbol}_{ts.replace(' ','_').replace(':','-')}"
@@ -1062,6 +1249,62 @@ def execute_real_trade(coin, trade_params, current_price):
     except Exception as e:
         print(f"Trade exec error: {e}")
         return False
+_pyramid_counts = {}  # symbol -> int
+
+def pyramid_winner(symbol, pos, multi_tf_data, md):
+    """
+    Add to a winning position up to 3 times if momentum persists.
+    Each add ~30% of current notional, same leverage.
+    """
+    try:
+        coin = pos["coin"]
+        price = pos["mark_price"]; entry = pos["entry_price"]
+        direction = pos["direction"]; lev = int(pos["leverage"])
+        pnl_pct = (price-entry)/entry if direction=="LONG" else (entry-price)/entry
+
+        # Conditions to consider add
+        if pnl_pct < 0.03:   # at least +3%
+            return False
+        if "1h" not in multi_tf_data or "closes" not in multi_tf_data["1h"]:
+            return False
+
+        # Momentum still aligned with direction?
+        ana = get_comprehensive_analysis(symbol, {coin: {"price": price, "change_24h":0, "volume":0}}, multi_tf_data)
+        if direction=="LONG" and ana["direction"] not in ("bullish",):
+            return False
+        if direction=="SHORT" and ana["direction"] not in ("bearish",):
+            return False
+
+        # Limit adds
+        n = _pyramid_counts.get(symbol, 0)
+        if n >= 3:
+            return False
+
+        # Position add sizing: ~30% of current notional
+        add_value = pos["notional"] * 0.30
+        qty = q_qty(symbol, add_value / price)
+        if qty <= 0:
+            return False
+
+        side = "BUY" if direction=="LONG" else "SELL"
+        res = place_futures_order(symbol, side, qty, lev)
+        if not res:
+            print(f"❌ Pyramid add failed for {symbol}")
+            return False
+
+        # Refresh SL/TP to cover increased size (reuse last known SL/TP)
+        set_stop_loss_take_profit(symbol, ana["factors"]["technical_indicators"]["details"]["bollinger"]["middle"] if ana["direction"]=="bullish" else price*1.02,
+                                  price*1.06 if direction=="LONG" else price*0.94,
+                                  direction)
+
+        _pyramid_counts[symbol] = n + 1
+        print(f"➕ Pyramided {coin}: add #{_pyramid_counts[symbol]} (qty={qty})")
+        return True
+    except Exception as e:
+        print(f"Pyramid error: {e}")
+        return False
+
+
 
 
 # ============== Pozisyon izleme & çıkış ==============
@@ -1141,14 +1384,39 @@ def monitor_positions():
             atr = 0
             if "1h" in mtd and all(k in mtd["1h"] for k in ("highs","lows","closes")):
                 atr = calculate_atr(mtd["1h"]["highs"], mtd["1h"]["lows"], mtd["1h"]["closes"])
+
+            # Try pyramiding winners (before exit checks)
+            try:
+                md = {pos["coin"]: {"price": pos["mark_price"], "change_24h":0, "volume":0}}
+                pyramid_winner(symbol, pos, mtd, md)
+            except Exception as _e:
+                pass
+
             should_close, reason = check_profit_taking_opportunity(pos, mtd)
             if should_close:
                 print(f"🧠 Exit {pos['coin']}: {reason}")
                 res = close_futures_position(symbol)
                 if res:
                     print(f"✅ Closed: {pos['coin']}")
-                    pnl_percent = (pos["pnl"] / (pos["notional"]/pos["leverage"])) * 100 if pos["notional"]>0 else 0
+                    # Approx realized PnL in $, and % on margin
+                    realized_usd = float(pos["pnl"])
+                    pnl_percent = (pos["pnl"] / (pos["notional"]/max(1,pos["leverage"]))) * 100 if pos["notional"]>0 else 0.0
                     update_ai_decision_outcome(pos["coin"], pos["direction"], pnl_percent)
+                    update_coin_stats(pos["coin"], pnl_percent)
+
+                    # Log CLOSE trade row
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    db_execute("""
+                        INSERT INTO trades (timestamp, position_id, coin, action, direction, price,
+                                            position_size, leverage, notional_value, stop_loss, take_profit,
+                                            pnl, pnl_percent, reason, confidence, profitable)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """, (ts, f"{symbol}_CLOSE_{ts.replace(' ','_').replace(':','-')}",
+                          pos["coin"], f"{pos['direction']} CLOSE", pos["direction"], pos["mark_price"],
+                          None, pos["leverage"], pos["notional"], None, None,
+                          realized_usd, pnl_percent, reason, None, 1 if pnl_percent>0 else 0))
+                    # Reset pyramid counter for this symbol
+                    _pyramid_counts.pop(symbol, None)
                 else:
                     print(f"❌ Close failed: {pos['coin']}")
             else:
@@ -1160,6 +1428,7 @@ def monitor_positions():
     except Exception as e:
         print(f"Monitor error: {e}")
         return {}
+
 
 def save_trade_to_db(trade_record):
     db_execute("""
@@ -1277,10 +1546,16 @@ def run_enhanced_bot():
                     print("\n🤖 Opportunity Scan:")
                     print(f"   Portfolio {prisk['positions_count']}/{MAX_CONCURRENT_POSITIONS} | Avail ${prisk['available_balance']:.2f} | Margin {prisk['margin_ratio']*100:.1f}% | Win {insights['win_rate']:.1f}%")
 
+                    # --- Learning & policy adjustments ---
+                    policy = get_policy_adjustments()
+                    b_thr = policy["global"]["bullish_thr"]
+                    s_thr = policy["global"]["bearish_thr"]
+                    explore = (random.random() < policy["global"]["exploration_rate"])
+
                     coin_scores = []
                     for coin in target_coins:
                         if coin not in md:
-                            continue  # safety: skip coins missing from tickers
+                            continue
                         sym = f"{coin}USDT"
                         if sym in current_positions:
                             continue
@@ -1289,7 +1564,9 @@ def run_enhanced_bot():
                         if ana["overall_score"] > 65 or ana["overall_score"] < 35:
                             coin_scores.append((coin, ana["overall_score"], ana, tf))
 
-                    coin_scores.sort(key=lambda x: abs(x[1] - 50), reverse=True)
+                    # UCB rank (monster smarts): exploration + exploitation
+                    coin_scores = rank_candidates_ucb(coin_scores)
+
                     max_new = min(3, MAX_CONCURRENT_POSITIONS - prisk["positions_count"])
                     executed = 0
 
@@ -1297,12 +1574,36 @@ def run_enhanced_bot():
                         print(f"\n   📊 Candidate #{i+1}: {coin} Score {score:.1f} Dir {ana['direction']}")
                         tp = ai_trade_decision(coin, md, tf, insights)
                         if tp and tp["direction"] != "SKIP":
-                            rr_disp = tp.get("tp_percentage", 0) / max(1e-6, tp.get("sl_percentage", 1))
+                            # sl/tp returned as percentages; default sl% to 1.0 to avoid division by zero
+                            rr_disp = tp.get("tp_percentage", 0.0) / max(1e-6, tp.get("sl_percentage", 1.0))
                             print(f"      AI: {tp['direction']} conf {tp['confidence']}/10 rr≈1:{rr_disp:.1f}")
+
                             if tp["confidence"] >= MIN_CONFIDENCE_THRESHOLD:
                                 rr = rr_disp
-                                if rr >= 1.8:
-                                    ok = execute_real_trade(coin, tp, md[coin]["price"])
+                                if rr >= 1.7:
+                                    # Per-coin adjustments
+                                    adj = policy["per_coin"].get(coin, {"bias": 0.0, "size_mult": 1.0, "lev_mult": 1.0})
+
+                                    # Regime-aware aggression (bigger in trends)
+                                    reg = ana["factors"]["market_regime"]["details"]["regime"]
+                                    reg_size = {"TRENDING_UP":1.15, "TRENDING_DOWN":1.15, "RANGING":0.92, "TRANSITIONAL":1.0}.get(reg,1.0)
+                                    reg_lev  = {"TRENDING_UP":1.10, "TRENDING_DOWN":1.10, "RANGING":0.96, "TRANSITIONAL":1.0}.get(reg,1.0)
+
+                                    size_mult = adj["size_mult"] * reg_size
+                                    lev_mult  = adj["lev_mult"]  * reg_lev
+
+                                    # Slight gate relax for top candidate during exploration
+                                    use_b_thr = b_thr - (2.0 if (explore and i == 0) else 0.0)
+                                    use_s_thr = s_thr + (2.0 if (explore and i == 0) else 0.0)
+
+                                    ok = execute_real_trade(
+                                        coin, tp, md[coin]["price"],
+                                        bullish_thr=use_b_thr,
+                                        bearish_thr=use_s_thr,
+                                        size_mult=size_mult,
+                                        lev_mult=lev_mult,
+                                        score_bias=adj["bias"]
+                                    )
                                     if ok:
                                         executed += 1
                                         time.sleep(1)
@@ -1341,6 +1642,8 @@ def run_enhanced_bot():
         except Exception as e:
             print(f"\n❌ Loop error: {e}")
             time.sleep(QUICK_CHECK_INTERVAL)
+
+
 
 
 # ============== Main ==============

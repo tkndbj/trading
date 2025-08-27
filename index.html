@@ -6,534 +6,642 @@
     <title>AI Trading Bot Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
     <link
-      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"
       rel="stylesheet"
     />
     <style>
-      /* Custom scrollbar */
-      ::-webkit-scrollbar {
-        width: 6px;
-        height: 6px;
-      }
-      ::-webkit-scrollbar-track {
-        background: #1f2937;
-      }
-      ::-webkit-scrollbar-thumb {
-        background: #4b5563;
-        border-radius: 3px;
-      }
-      ::-webkit-scrollbar-thumb:hover {
-        background: #6b7280;
-      }
-
-      /* Animations */
-      @keyframes pulse {
-        0%,
-        100% {
-          opacity: 1;
-        }
-        50% {
-          opacity: 0.5;
-        }
+      :root {
+        --bg-primary: #0a0e1a;
+        --bg-secondary: #0f172a;
+        --bg-tertiary: #1e293b;
+        --accent-blue: #3b82f6;
+        --accent-green: #10b981;
+        --accent-red: #ef4444;
+        --accent-yellow: #f59e0b;
+        --text-primary: #f8fafc;
+        --text-secondary: #cbd5e1;
+        --text-muted: #64748b;
+        --border-color: rgba(148, 163, 184, 0.1);
+        --glow-blue: rgba(59, 130, 246, 0.3);
       }
 
-      .pulse {
-        animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
       }
 
-      .collapsible-content {
-        transition: all 0.3s ease-out;
+      body {
+        background: linear-gradient(
+          135deg,
+          var(--bg-primary) 0%,
+          var(--bg-secondary) 50%,
+          var(--bg-primary) 100%
+        );
+        color: var(--text-primary);
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+        min-height: 100vh;
+        overflow-x: hidden;
+      }
+
+      .glass {
+        background: rgba(15, 23, 42, 0.6);
+        backdrop-filter: blur(16px);
+        border: 1px solid var(--border-color);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+      }
+
+      .card {
+        background: linear-gradient(
+          135deg,
+          rgba(30, 41, 59, 0.8) 0%,
+          rgba(15, 23, 42, 0.9) 100%
+        );
+        border: 1px solid var(--border-color);
+        backdrop-filter: blur(12px);
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      .card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4), 0 0 20px var(--glow-blue);
+        border-color: rgba(59, 130, 246, 0.3);
+      }
+
+      .metric-card {
+        background: linear-gradient(
+          135deg,
+          var(--bg-tertiary) 0%,
+          var(--bg-secondary) 100%
+        );
+        border: 1px solid var(--border-color);
+        position: relative;
         overflow: hidden;
       }
 
-      .collapsible-content.hidden {
-        max-height: 0;
-        opacity: 0;
-        transform: translateY(-10px);
-      }
-
-      /* Glass morphism effect */
-      .glass {
-        background: rgba(31, 41, 55, 0.8);
-        backdrop-filter: blur(10px);
-        border: 1px solid rgba(75, 85, 99, 0.3);
-      }
-
-      /* Compact card styling */
-      .compact-card {
-        background: linear-gradient(
-          135deg,
-          rgba(31, 41, 55, 0.9) 0%,
-          rgba(17, 24, 39, 0.9) 100%
-        );
-        border: 1px solid rgba(75, 85, 99, 0.2);
-        backdrop-filter: blur(8px);
-      }
-
-      /* Modern toggle switch */
-      .toggle-switch {
-        position: relative;
-        width: 44px;
-        height: 24px;
-        background: #374151;
-        border-radius: 12px;
-        cursor: pointer;
-        transition: all 0.3s ease;
-      }
-
-      .toggle-switch.active {
-        background: #3b82f6;
-      }
-
-      .toggle-switch::after {
+      .metric-card::before {
         content: "";
         position: absolute;
-        top: 2px;
-        left: 2px;
-        width: 20px;
-        height: 20px;
-        background: white;
-        border-radius: 50%;
-        transition: all 0.3s ease;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 2px;
+        background: linear-gradient(
+          90deg,
+          var(--accent-blue),
+          var(--accent-green)
+        );
+        opacity: 0.7;
       }
 
-      .toggle-switch.active::after {
-        transform: translateX(20px);
-      }
-
-      /* Hover effects */
-      .hover-lift {
-        transition: all 0.2s ease;
-      }
-
-      .hover-lift:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
-      }
-
-      /* Status indicators */
-      .status-dot {
+      .status-indicator {
+        position: relative;
         width: 8px;
         height: 8px;
         border-radius: 50%;
-        display: inline-block;
         margin-right: 8px;
       }
 
       .status-live {
-        background: #10b981;
+        background: var(--accent-green);
+        animation: pulse-dot 2s infinite;
       }
+
       .status-offline {
-        background: #ef4444;
+        background: var(--accent-red);
+      }
+
+      @keyframes pulse-dot {
+        0%,
+        100% {
+          opacity: 1;
+          transform: scale(1);
+        }
+        50% {
+          opacity: 0.5;
+          transform: scale(1.2);
+        }
+      }
+
+      .progress-bar {
+        height: 3px;
+        background: rgba(59, 130, 246, 0.2);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+
+      .progress-fill {
+        height: 100%;
+        background: linear-gradient(
+          90deg,
+          var(--accent-blue),
+          var(--accent-green)
+        );
+        transition: width 1s ease-in-out;
+      }
+
+      .table-row {
+        transition: all 0.2s ease;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.05);
+      }
+
+      .table-row:hover {
+        background: rgba(59, 130, 246, 0.05);
+        transform: translateX(4px);
+      }
+
+      .scrollbar-hide {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+      }
+
+      .scrollbar-hide::-webkit-scrollbar {
+        display: none;
+      }
+
+      .trading-indicator {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+
+      .long-indicator {
+        background: rgba(16, 185, 129, 0.2);
+        color: var(--accent-green);
+        border: 1px solid rgba(16, 185, 129, 0.3);
+      }
+
+      .short-indicator {
+        background: rgba(239, 68, 68, 0.2);
+        color: var(--accent-red);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+      }
+
+      .chart-container {
+        position: relative;
+        height: 200px;
+        background: rgba(15, 23, 42, 0.5);
+        border-radius: 8px;
+        padding: 12px;
+      }
+
+      .mini-chart {
+        height: 60px;
+      }
+
+      .section-header {
+        display: flex;
+        align-items: center;
+        justify-content: between;
+        margin-bottom: 16px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--border-color);
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 8px;
+        border-radius: 6px;
+        font-size: 11px;
+        font-weight: 500;
+      }
+
+      .badge-success {
+        background: rgba(16, 185, 129, 0.2);
+        color: var(--accent-green);
+      }
+      .badge-danger {
+        background: rgba(239, 68, 68, 0.2);
+        color: var(--accent-red);
+      }
+      .badge-warning {
+        background: rgba(245, 158, 11, 0.2);
+        color: var(--accent-yellow);
+      }
+      .badge-info {
+        background: rgba(59, 130, 246, 0.2);
+        color: var(--accent-blue);
+      }
+
+      .compact-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+      }
+
+      .toggle-button {
+        background: rgba(59, 130, 246, 0.1);
+        border: 1px solid rgba(59, 130, 246, 0.3);
+        color: var(--accent-blue);
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+
+      .toggle-button.active {
+        background: var(--accent-blue);
+        color: white;
+      }
+
+      .collapsible {
+        overflow: hidden;
+        transition: max-height 0.3s ease-out, opacity 0.3s ease-out;
+      }
+
+      .collapsible.collapsed {
+        max-height: 0;
+        opacity: 0;
       }
     </style>
   </head>
-  <body
-    class="bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 text-white min-h-screen"
-  >
-    <!-- Header -->
-    <nav class="glass sticky top-0 z-50 border-b border-gray-700/50">
-      <div class="container mx-auto px-4 py-3">
+  <body>
+    <!-- Navigation -->
+    <nav class="glass sticky top-0 z-50 border-b border-gray-700/30">
+      <div class="px-6 py-3">
         <div class="flex items-center justify-between">
-          <h1
-            class="text-xl font-bold bg-gradient-to-r from-blue-400 via-purple-400 to-cyan-400 bg-clip-text text-transparent"
-          >
-            <i class="fas fa-brain mr-2"></i>AI Trading Bot
-            <span
-              id="trading-mode-indicator"
-              class="ml-3 text-sm font-bold text-red-400"
-            >
-              <i class="fas fa-exclamation-triangle mr-1"></i>LIVE MODE
-            </span>
-          </h1>
-
           <div class="flex items-center space-x-4">
-            <div class="hidden md:flex items-center space-x-3 text-xs">
-              <span class="flex items-center text-gray-300">
-                <i class="fas fa-bolt text-yellow-400 mr-1"></i>Real Trading
+            <h1
+              class="text-xl font-bold bg-gradient-to-r from-blue-400 via-purple-400 to-cyan-400 bg-clip-text text-transparent"
+            >
+              <i class="fas fa-brain mr-2"></i>AI Trading Bot
+            </h1>
+            <div class="hidden md:flex items-center space-x-3">
+              <span class="badge badge-danger">
+                <i class="fas fa-bolt mr-1"></i>LIVE FUTURES
               </span>
-              <span class="flex items-center text-gray-300">
-                <i class="fas fa-chart-line text-green-400 mr-1"></i>Multi-TF
-              </span>
-              <span class="flex items-center text-gray-300">
-                <i class="fas fa-shield-alt text-blue-400 mr-1"></i>Dynamic Risk
+              <span class="badge badge-info">
+                <i class="fas fa-chart-line mr-1"></i>Multi-TF
               </span>
             </div>
+          </div>
 
-            <div class="connection-status flex items-center text-sm">
-              <span class="status-dot status-live pulse"></span>
-              <span class="text-green-400 font-medium">LIVE</span>
+          <div class="flex items-center space-x-4">
+            <div
+              class="flex items-center space-x-2 text-sm"
+              id="connection-status"
+            >
+              <div class="status-indicator status-live"></div>
+              <span class="text-green-400 font-medium">CONNECTED</span>
+            </div>
+            <div class="text-xs text-gray-400" id="last-update">
+              Last update: --:--
             </div>
           </div>
         </div>
       </div>
     </nav>
 
-    <div class="container mx-auto px-4 py-6 space-y-6">
+    <div class="px-6 py-4 space-y-4">
       <!-- Portfolio Summary -->
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div class="compact-card rounded-xl p-4 hover-lift">
+      <div class="compact-grid">
+        <div class="metric-card rounded-lg p-4">
           <div class="flex items-center justify-between">
             <div>
-              <p class="text-gray-400 text-xs mb-1">Portfolio</p>
-              <p class="text-xl font-bold text-white" id="total-value">$0.00</p>
+              <p class="text-xs text-gray-400 mb-1">Total Value</p>
+              <p class="text-2xl font-bold" id="total-value">$0.00</p>
+              <div class="progress-bar mt-2">
+                <div class="progress-fill" style="width: 75%"></div>
+              </div>
             </div>
-            <div
-              class="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg flex items-center justify-center"
-            >
-              <i class="fas fa-wallet text-white text-sm"></i>
-            </div>
+            <i class="fas fa-wallet text-2xl text-blue-400 opacity-70"></i>
           </div>
         </div>
 
-        <div class="compact-card rounded-xl p-4 hover-lift">
+        <div class="metric-card rounded-lg p-4">
           <div class="flex items-center justify-between">
             <div>
-              <p class="text-gray-400 text-xs mb-1">Balance</p>
-              <p class="text-xl font-bold text-white" id="balance">$0.00</p>
-            </div>
-            <div
-              class="w-10 h-10 bg-gradient-to-br from-green-500 to-green-600 rounded-lg flex items-center justify-center"
-            >
-              <i class="fas fa-dollar-sign text-white text-sm"></i>
-            </div>
-          </div>
-        </div>
-
-        <div class="compact-card rounded-xl p-4 hover-lift">
-          <div class="flex items-center justify-between">
-            <div>
-              <p class="text-gray-400 text-xs mb-1">Positions</p>
-              <p class="text-xl font-bold text-white" id="active-positions">
-                0
+              <p class="text-xs text-gray-400 mb-1">Available Balance</p>
+              <p class="text-2xl font-bold" id="balance">$0.00</p>
+              <p class="text-xs text-green-400 mt-1" id="balance-change">
+                +0.00%
               </p>
             </div>
-            <div
-              class="w-10 h-10 bg-gradient-to-br from-yellow-500 to-yellow-600 rounded-lg flex items-center justify-center"
-            >
-              <i class="fas fa-coins text-white text-sm"></i>
-            </div>
+            <i class="fas fa-coins text-2xl text-green-400 opacity-70"></i>
           </div>
         </div>
 
-        <div class="compact-card rounded-xl p-4 hover-lift">
+        <div class="metric-card rounded-lg p-4">
           <div class="flex items-center justify-between">
             <div>
-              <p class="text-gray-400 text-xs mb-1">Trades</p>
-              <p class="text-xl font-bold text-white" id="total-trades">0</p>
+              <p class="text-xs text-gray-400 mb-1">Active Positions</p>
+              <p class="text-2xl font-bold" id="active-positions">0</p>
+              <p class="text-xs text-gray-400 mt-1">Max: 8</p>
             </div>
-            <div
-              class="w-10 h-10 bg-gradient-to-br from-purple-500 to-purple-600 rounded-lg flex items-center justify-center"
-            >
-              <i class="fas fa-exchange-alt text-white text-sm"></i>
+            <i
+              class="fas fa-chart-area text-2xl text-yellow-400 opacity-70"
+            ></i>
+          </div>
+        </div>
+
+        <div class="metric-card rounded-lg p-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-xs text-gray-400 mb-1">Total P&L</p>
+              <p class="text-2xl font-bold" id="total-pnl">$0.00</p>
+              <p class="text-xs" id="pnl-percentage">0.00%</p>
             </div>
+            <i
+              class="fas fa-trending-up text-2xl text-purple-400 opacity-70"
+            ></i>
+          </div>
+        </div>
+
+        <div class="metric-card rounded-lg p-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-xs text-gray-400 mb-1">Win Rate</p>
+              <p class="text-2xl font-bold" id="win-rate">0%</p>
+              <p class="text-xs text-gray-400 mt-1" id="total-trades">
+                0 trades
+              </p>
+            </div>
+            <i class="fas fa-bullseye text-2xl text-cyan-400 opacity-70"></i>
+          </div>
+        </div>
+
+        <div class="metric-card rounded-lg p-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-xs text-gray-400 mb-1">Margin Usage</p>
+              <p class="text-2xl font-bold" id="margin-usage">0%</p>
+              <div class="progress-bar mt-2">
+                <div
+                  class="progress-fill"
+                  id="margin-progress"
+                  style="width: 0%"
+                ></div>
+              </div>
+            </div>
+            <i
+              class="fas fa-shield-alt text-2xl text-orange-400 opacity-70"
+            ></i>
           </div>
         </div>
       </div>
 
-      <!-- Toggleable Sections Control Panel -->
-      <div class="compact-card rounded-xl p-4">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="text-lg font-semibold text-white flex items-center">
+      <!-- Control Panel -->
+      <div class="card rounded-xl p-4">
+        <div class="section-header">
+          <h3 class="text-lg font-semibold flex items-center">
             <i class="fas fa-sliders-h mr-2 text-blue-400"></i>Dashboard
             Controls
           </h3>
         </div>
-
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div class="flex items-center justify-between">
-            <span class="text-sm text-gray-300">Market Data</span>
-            <div
-              class="toggle-switch active"
-              data-toggle="market-section"
-            ></div>
-          </div>
-
-          <div class="flex items-center justify-between">
-            <span class="text-sm text-gray-300">Charts</span>
-            <div
-              class="toggle-switch active"
-              data-toggle="charts-section"
-            ></div>
-          </div>
-
-          <div class="flex items-center justify-between">
-            <span class="text-sm text-gray-300">AI Metrics</span>
-            <div
-              class="toggle-switch"
-              data-toggle="learning-metrics-section"
-            ></div>
-          </div>
-
-          <div class="flex items-center justify-between">
-            <span class="text-sm text-gray-300">Cost Tracking</span>
-            <div
-              class="toggle-switch"
-              data-toggle="cost-tracking-section"
-            ></div>
-          </div>
+        <div class="flex flex-wrap gap-2">
+          <button class="toggle-button active" data-toggle="positions-section">
+            Positions
+          </button>
+          <button class="toggle-button active" data-toggle="market-section">
+            Market Data
+          </button>
+          <button class="toggle-button active" data-toggle="trades-section">
+            Trade History
+          </button>
+          <button class="toggle-button" data-toggle="analytics-section">
+            Analytics
+          </button>
+          <button class="toggle-button" data-toggle="costs-section">
+            Cost Tracking
+          </button>
+          <button class="toggle-button" data-toggle="settings-section">
+            Settings
+          </button>
         </div>
       </div>
 
-      <!-- Main Content Grid -->
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6" id="main-content">
-        <!-- Market Data Section -->
-        <div class="lg:col-span-2 collapsible-content" id="market-section">
-          <div
-            class="compact-card rounded-xl p-5 hover-lift"
-            id="market-data-section"
-          >
-            <div class="flex items-center justify-between mb-4">
-              <h2 class="text-lg font-bold text-blue-400 flex items-center">
-                <i class="fas fa-chart-candlestick mr-2"></i>Live Market Data
-              </h2>
-              <span
-                class="text-xs text-gray-400 bg-gray-700/50 px-2 py-1 rounded-full"
+      <!-- Main Content Layout -->
+      <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <!-- Left Column -->
+        <div class="xl:col-span-2 space-y-4">
+          <!-- Active Positions -->
+          <div class="collapsible" id="positions-section">
+            <div class="card rounded-xl p-4">
+              <div class="section-header">
+                <h3 class="text-lg font-semibold flex items-center">
+                  <i class="fas fa-chart-area mr-2 text-green-400"></i>Active
+                  Positions
+                </h3>
+                <div class="flex space-x-2">
+                  <span class="badge badge-info">Futures</span>
+                  <span class="badge badge-success" id="positions-count"
+                    >0 Open</span
+                  >
+                </div>
+              </div>
+
+              <div class="overflow-hidden">
+                <div class="overflow-x-auto scrollbar-hide">
+                  <table class="w-full text-sm">
+                    <thead>
+                      <tr
+                        class="text-xs text-gray-400 border-b border-gray-700/30"
+                      >
+                        <th class="text-left py-2 px-2 font-medium">Symbol</th>
+                        <th class="text-left py-2 px-2 font-medium">Side</th>
+                        <th class="text-right py-2 px-2 font-medium">Size</th>
+                        <th class="text-right py-2 px-2 font-medium">Entry</th>
+                        <th class="text-right py-2 px-2 font-medium">Mark</th>
+                        <th class="text-right py-2 px-2 font-medium">P&L</th>
+                        <th class="text-right py-2 px-2 font-medium">Lev</th>
+                      </tr>
+                    </thead>
+                    <tbody id="positions-tbody">
+                      <tr>
+                        <td colspan="7" class="text-center py-8 text-gray-500">
+                          <i
+                            class="fas fa-chart-line text-2xl mb-2 block opacity-50"
+                          ></i>
+                          No active positions
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Trade History -->
+          <div class="collapsible" id="trades-section">
+            <div class="card rounded-xl p-4">
+              <div class="section-header">
+                <h3 class="text-lg font-semibold flex items-center">
+                  <i class="fas fa-history mr-2 text-purple-400"></i>Trade
+                  History
+                </h3>
+                <span class="badge badge-info">Recent 20</span>
+              </div>
+
+              <div class="overflow-hidden">
+                <div class="overflow-x-auto scrollbar-hide">
+                  <table class="w-full text-sm">
+                    <thead>
+                      <tr
+                        class="text-xs text-gray-400 border-b border-gray-700/30"
+                      >
+                        <th class="text-left py-2 px-2 font-medium">Time</th>
+                        <th class="text-left py-2 px-2 font-medium">Symbol</th>
+                        <th class="text-left py-2 px-2 font-medium">Action</th>
+                        <th class="text-right py-2 px-2 font-medium">Price</th>
+                        <th class="text-right py-2 px-2 font-medium">P&L</th>
+                        <th class="text-center py-2 px-2 font-medium">Conf</th>
+                      </tr>
+                    </thead>
+                    <tbody id="trades-tbody">
+                      <tr>
+                        <td colspan="6" class="text-center py-8 text-gray-500">
+                          <i
+                            class="fas fa-clock text-2xl mb-2 block opacity-50"
+                          ></i>
+                          No trades yet
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Column -->
+        <div class="space-y-4">
+          <!-- Market Data -->
+          <div class="collapsible" id="market-section">
+            <div class="card rounded-xl p-4">
+              <div class="section-header">
+                <h3 class="text-lg font-semibold flex items-center">
+                  <i class="fas fa-chart-candlestick mr-2 text-blue-400"></i
+                  >Market Data
+                </h3>
+                <span class="badge badge-success">Live</span>
+              </div>
+
+              <div
+                class="space-y-2 max-h-80 overflow-y-auto scrollbar-hide"
+                id="market-data"
               >
-                Real-time
-              </span>
-            </div>
-            <div class="space-y-3" id="market-data">
-              <!-- Market data will be populated here -->
-            </div>
-          </div>
-        </div>
-
-        <!-- Charts Section -->
-        <div class="space-y-6 collapsible-content" id="charts-section">
-          <div class="compact-card rounded-xl p-5 hover-lift">
-            <h3 class="text-lg font-bold mb-4 text-blue-400 flex items-center">
-              <i class="fas fa-pie-chart mr-2"></i>Allocation
-            </h3>
-            <div class="h-48">
-              <canvas id="portfolio-chart"></canvas>
+                <div class="text-center py-8 text-gray-500">
+                  <i class="fas fa-sync fa-spin text-xl mb-2 block"></i>
+                  Loading market data...
+                </div>
+              </div>
             </div>
           </div>
 
-          <div class="compact-card rounded-xl p-5 hover-lift">
-            <h3 class="text-lg font-bold mb-4 text-green-400 flex items-center">
-              <i class="fas fa-chart-area mr-2"></i>Performance
-            </h3>
-            <div class="h-32">
-              <canvas id="performance-chart"></canvas>
-            </div>
-          </div>
-        </div>
-      </div>
+          <!-- Analytics -->
+          <div class="collapsible collapsed" id="analytics-section">
+            <div class="card rounded-xl p-4">
+              <div class="section-header">
+                <h3 class="text-lg font-semibold flex items-center">
+                  <i class="fas fa-chart-pie mr-2 text-cyan-400"></i>Analytics
+                </h3>
+              </div>
 
-      <!-- Active Positions -->
-      <div class="compact-card rounded-xl p-5 hover-lift">
-        <div class="flex items-center justify-between mb-4">
-          <h2 class="text-lg font-bold text-blue-400 flex items-center">
-            <i class="fas fa-chart-area mr-2"></i>Active Positions
-          </h2>
-          <span
-            class="text-xs text-gray-400 bg-gradient-to-r from-blue-600/20 to-purple-600/20 px-3 py-1 rounded-full border border-blue-500/30"
-          >
-            Real Binance Futures
-          </span>
-        </div>
+              <div class="space-y-4">
+                <div class="chart-container mini-chart">
+                  <canvas id="performance-chart"></canvas>
+                </div>
 
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm" id="positions-table">
-            <thead>
-              <tr class="border-b border-gray-700/50">
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Position
-                </th>
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Size
-                </th>
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Entry
-                </th>
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Current
-                </th>
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  P&L
-                </th>
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Leverage
-                </th>
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Notional
-                </th>
-              </tr>
-            </thead>
-            <tbody id="positions-body">
-              <tr>
-                <td colspan="7" class="text-center py-12 text-gray-400">
-                  <div class="flex flex-col items-center">
-                    <i class="fas fa-inbox text-3xl mb-3 opacity-50"></i>
-                    <span class="text-sm">No active positions</span>
+                <div class="grid grid-cols-2 gap-3">
+                  <div class="bg-gray-800/30 rounded-lg p-3 text-center">
+                    <p class="text-xs text-gray-400 mb-1">Avg Hold Time</p>
+                    <p class="font-bold" id="avg-hold-time">--</p>
                   </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- Trade History -->
-      <div class="compact-card rounded-xl p-5 hover-lift">
-        <div class="flex items-center justify-between mb-4">
-          <h2 class="text-lg font-bold text-blue-400 flex items-center">
-            <i class="fas fa-history mr-2"></i>Trade History
-          </h2>
-          <span
-            class="text-xs text-gray-400 bg-gradient-to-r from-green-600/20 to-blue-600/20 px-3 py-1 rounded-full border border-green-500/30"
-          >
-            Recent 20 Trades
-          </span>
-        </div>
-
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm" id="trades-table">
-            <thead>
-              <tr class="border-b border-gray-700/50">
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Time
-                </th>
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Coin
-                </th>
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Action
-                </th>
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Price
-                </th>
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Size
-                </th>
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Leverage
-                </th>
-                <th class="text-left py-2 px-3 text-gray-400 font-medium">
-                  Confidence
-                </th>
-              </tr>
-            </thead>
-            <tbody id="trades-body">
-              <tr>
-                <td colspan="7" class="text-center py-12 text-gray-400">
-                  <div class="flex flex-col items-center">
-                    <i class="fas fa-chart-line text-3xl mb-3 opacity-50"></i>
-                    <span class="text-sm"
-                      >No trades yet - AI analyzing markets</span
-                    >
+                  <div class="bg-gray-800/30 rounded-lg p-3 text-center">
+                    <p class="text-xs text-gray-400 mb-1">Best Leverage</p>
+                    <p class="font-bold" id="best-leverage">15x</p>
                   </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cost Tracking -->
+          <div class="collapsible collapsed" id="costs-section">
+            <div class="card rounded-xl p-4">
+              <div class="section-header">
+                <h3 class="text-lg font-semibold flex items-center">
+                  <i class="fas fa-dollar-sign mr-2 text-yellow-400"></i>Cost
+                  Tracking
+                </h3>
+              </div>
+
+              <div class="space-y-3">
+                <div class="grid grid-cols-2 gap-3">
+                  <div class="bg-gray-800/30 rounded-lg p-3 text-center">
+                    <p class="text-xs text-gray-400 mb-1">OpenAI</p>
+                    <p class="font-bold text-blue-400" id="openai-cost">
+                      $0.0000
+                    </p>
+                  </div>
+                  <div class="bg-gray-800/30 rounded-lg p-3 text-center">
+                    <p class="text-xs text-gray-400 mb-1">Railway</p>
+                    <p class="font-bold text-purple-400" id="railway-cost">
+                      $0.0000
+                    </p>
+                  </div>
+                </div>
+
+                <div
+                  class="bg-gradient-to-r from-blue-900/30 to-purple-900/30 rounded-lg p-3"
+                >
+                  <p class="text-xs text-gray-400 mb-1">Monthly Projection</p>
+                  <p class="font-bold text-lg" id="monthly-projection">$0.00</p>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
-      <!-- Bot Status -->
-      <div class="compact-card rounded-xl p-5 hover-lift">
-        <h2 class="text-lg font-bold mb-4 text-purple-400 flex items-center">
-          <i class="fas fa-robot mr-2"></i>Bot Status
-        </h2>
-
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-          <div class="text-center bg-gray-700/30 rounded-lg p-3">
-            <p class="text-xs text-gray-400 mb-1">Quick Checks</p>
-            <p class="text-lg font-bold text-green-400">15s</p>
+      <!-- Bot Status Footer -->
+      <div class="card rounded-xl p-4">
+        <div class="grid grid-cols-2 md:grid-cols-6 gap-4 text-center">
+          <div class="bg-gray-800/30 rounded-lg p-3">
+            <i class="fas fa-robot text-blue-400 mb-1 block"></i>
+            <p class="text-xs text-gray-400">AI Decision</p>
+            <p class="font-bold text-xs text-green-400">Active</p>
           </div>
-          <div class="text-center bg-gray-700/30 rounded-lg p-3">
-            <p class="text-xs text-gray-400 mb-1">Full Analysis</p>
-            <p class="text-lg font-bold text-blue-400">3m</p>
+          <div class="bg-gray-800/30 rounded-lg p-3">
+            <i class="fas fa-shield text-green-400 mb-1 block"></i>
+            <p class="text-xs text-gray-400">Risk Mgmt</p>
+            <p class="font-bold text-xs text-green-400">Active</p>
           </div>
-          <div class="text-center bg-gray-700/30 rounded-lg p-3">
-            <p class="text-xs text-gray-400 mb-1">Max Positions</p>
-            <p class="text-lg font-bold text-yellow-400">6</p>
+          <div class="bg-gray-800/30 rounded-lg p-3">
+            <i class="fas fa-chart-line text-purple-400 mb-1 block"></i>
+            <p class="text-xs text-gray-400">Multi-TF</p>
+            <p class="font-bold text-xs text-green-400">Active</p>
           </div>
-          <div class="text-center bg-gray-700/30 rounded-lg p-3">
-            <p class="text-xs text-gray-400 mb-1">Min Confidence</p>
-            <p class="text-lg font-bold text-purple-400">6/10</p>
+          <div class="bg-gray-800/30 rounded-lg p-3">
+            <i class="fas fa-brain text-cyan-400 mb-1 block"></i>
+            <p class="text-xs text-gray-400">Learning</p>
+            <p class="font-bold text-xs text-green-400">Active</p>
           </div>
-        </div>
-
-        <div class="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
-          <div class="flex items-center text-gray-300">
-            <span class="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
-            AI Memory System
+          <div class="bg-gray-800/30 rounded-lg p-3">
+            <i class="fas fa-stopwatch text-yellow-400 mb-1 block"></i>
+            <p class="text-xs text-gray-400">Quick Check</p>
+            <p class="font-bold text-xs">15s</p>
           </div>
-          <div class="flex items-center text-gray-300">
-            <span class="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
-            Smart Profit Taking
-          </div>
-          <div class="flex items-center text-gray-300">
-            <span class="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
-            Market Regime Detection
-          </div>
-          <div class="flex items-center text-gray-300">
-            <span class="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
-            Dynamic SL/TP
-          </div>
-          <div class="flex items-center text-gray-300">
-            <span class="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
-            Timeframe Alignment
-          </div>
-          <div class="flex items-center text-gray-300">
-            <span class="w-2 h-2 bg-green-400 rounded-full mr-2"></span>
-            Real Binance API
+          <div class="bg-gray-800/30 rounded-lg p-3">
+            <i class="fas fa-sync text-orange-400 mb-1 block"></i>
+            <p class="text-xs text-gray-400">Full Analysis</p>
+            <p class="font-bold text-xs">3m</p>
           </div>
         </div>
       </div>
     </div>
 
-    <script>
-      // Initialize toggle functionality
-      document.addEventListener("DOMContentLoaded", function () {
-        initToggleSwitches();
-        fetchData();
-        setInterval(fetchData, 15000); // Update every 15 seconds
-      });
-
-      function initToggleSwitches() {
-        const toggles = document.querySelectorAll(".toggle-switch");
-
-        toggles.forEach((toggle) => {
-          toggle.addEventListener("click", function () {
-            const targetId = this.getAttribute("data-toggle");
-            const targetElement = document.getElementById(targetId);
-
-            if (targetElement) {
-              this.classList.toggle("active");
-
-              if (this.classList.contains("active")) {
-                targetElement.classList.remove("hidden");
-                targetElement.style.display = "";
-              } else {
-                targetElement.classList.add("hidden");
-                setTimeout(() => {
-                  if (targetElement.classList.contains("hidden")) {
-                    targetElement.style.display = "none";
-                  }
-                }, 300);
-              }
-            }
-          });
-        });
-
-        // Initially hide non-active sections
-        toggles.forEach((toggle) => {
-          if (!toggle.classList.contains("active")) {
-            const targetId = toggle.getAttribute("data-toggle");
-            const targetElement = document.getElementById(targetId);
-            if (targetElement) {
-              targetElement.classList.add("hidden");
-              targetElement.style.display = "none";
-            }
-          }
-        });
-      }
-    </script>
     <script src="dashboard.js"></script>
   </body>
 </html>

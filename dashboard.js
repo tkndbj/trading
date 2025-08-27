@@ -1,55 +1,78 @@
-let portfolioChart = null;
+// Advanced Trading Bot Dashboard
 let performanceChart = null;
-let portfolioHistory = []; // Track portfolio value over time
+let portfolioHistory = [];
+let lastUpdateTime = null;
+let updateInterval = null;
 
-// Initialize dashboard
+// Dashboard State
+const dashboardState = {
+  isConnected: true,
+  sections: new Map(),
+  lastData: null,
+  errorCount: 0,
+};
+
+// Initialize Dashboard
 document.addEventListener("DOMContentLoaded", function () {
-  initPortfolioChart();
-  initPerformanceChart();
-  fetchData();
+  console.log("🚀 Initializing Advanced Trading Dashboard...");
 
-  // Update every 15 seconds
-  setInterval(fetchData, 15000);
+  initializeComponents();
+  initializeEventListeners();
+  startDataFetching();
+
+  // Initialize sections state
+  const toggleButtons = document.querySelectorAll(".toggle-button");
+  toggleButtons.forEach((button) => {
+    const sectionId = button.getAttribute("data-toggle");
+    const section = document.getElementById(sectionId);
+    const isActive = button.classList.contains("active");
+
+    dashboardState.sections.set(sectionId, isActive);
+
+    if (!isActive && section) {
+      section.classList.add("collapsed");
+    }
+  });
 });
 
-function initPortfolioChart() {
-  const ctx = document.getElementById("portfolio-chart").getContext("2d");
-  portfolioChart = new Chart(ctx, {
-    type: "doughnut",
-    data: {
-      labels: ["Cash"],
-      datasets: [
-        {
-          data: [100],
-          backgroundColor: ["#60a5fa"],
-          borderWidth: 0,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          position: "bottom",
-          labels: {
-            color: "#9ca3af",
-            padding: 15,
-            font: {
-              size: 11,
-            },
-          },
-        },
-      },
-    },
+function initializeComponents() {
+  initPerformanceChart();
+  updateLastUpdateTime();
+}
+
+function initializeEventListeners() {
+  // Toggle button functionality
+  document.querySelectorAll(".toggle-button").forEach((button) => {
+    button.addEventListener("click", function () {
+      const sectionId = this.getAttribute("data-toggle");
+      const section = document.getElementById(sectionId);
+
+      if (!section) return;
+
+      this.classList.toggle("active");
+      const isActive = this.classList.contains("active");
+
+      dashboardState.sections.set(sectionId, isActive);
+
+      if (isActive) {
+        section.classList.remove("collapsed");
+      } else {
+        section.classList.add("collapsed");
+      }
+    });
   });
+
+  // Handle connection events
+  window.addEventListener("online", () => updateConnectionStatus(true));
+  window.addEventListener("offline", () => updateConnectionStatus(false));
 }
 
 function initPerformanceChart() {
-  const ctx = document.getElementById("performance-chart");
-  if (!ctx) return;
+  const canvas = document.getElementById("performance-chart");
+  if (!canvas) return;
 
-  performanceChart = new Chart(ctx.getContext("2d"), {
+  const ctx = canvas.getContext("2d");
+  performanceChart = new Chart(ctx, {
     type: "line",
     data: {
       labels: [],
@@ -57,12 +80,13 @@ function initPerformanceChart() {
         {
           label: "Portfolio Value",
           data: [],
-          borderColor: "#60a5fa",
-          backgroundColor: "rgba(96, 165, 250, 0.1)",
+          borderColor: "#3b82f6",
+          backgroundColor: "rgba(59, 130, 246, 0.1)",
           borderWidth: 2,
           tension: 0.4,
           pointRadius: 0,
           pointHoverRadius: 4,
+          fill: true,
         },
       ],
     },
@@ -70,500 +94,543 @@ function initPerformanceChart() {
       responsive: true,
       maintainAspectRatio: false,
       plugins: {
-        legend: {
-          display: false,
+        legend: { display: false },
+        tooltip: {
+          mode: "index",
+          intersect: false,
+          backgroundColor: "rgba(15, 23, 42, 0.9)",
+          titleColor: "#f8fafc",
+          bodyColor: "#cbd5e1",
+          borderColor: "#3b82f6",
+          borderWidth: 1,
         },
+      },
+      interaction: {
+        mode: "nearest",
+        axis: "x",
+        intersect: false,
       },
       scales: {
         x: {
-          grid: {
-            color: "#374151",
-            drawBorder: false,
-          },
-          ticks: {
-            color: "#9ca3af",
-            font: {
-              size: 10,
-            },
-          },
+          display: false,
+          grid: { display: false },
         },
         y: {
-          grid: {
-            color: "#374151",
-            drawBorder: false,
-          },
-          ticks: {
-            color: "#9ca3af",
-            font: {
-              size: 10,
-            },
-            callback: function (value) {
-              return "$" + value.toFixed(0);
-            },
-          },
+          display: false,
+          grid: { display: false },
         },
       },
     },
   });
 }
 
+function startDataFetching() {
+  // Initial fetch
+  fetchData();
+
+  // Set up interval
+  if (updateInterval) clearInterval(updateInterval);
+  updateInterval = setInterval(fetchData, 15000); // 15 seconds
+}
+
 async function fetchData() {
   try {
     const response = await fetch("/api/status");
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
     const data = await response.json();
 
     if (data.error) {
-      console.error("API Error:", data.error);
-      document.querySelector(".connection-status").innerHTML =
-        '<span class="status-dot status-offline"></span><span class="text-red-400 font-medium">ERROR</span>';
-      return;
+      throw new Error(data.error);
     }
 
-    updateSummaryCards(data);
-    updateMarketData(data.market_data);
-    updatePositions(data.positions, data.market_data);
+    // Update dashboard with new data
+    updateDashboard(data);
+    updateConnectionStatus(true);
+    dashboardState.errorCount = 0;
+    dashboardState.lastData = data;
+  } catch (error) {
+    console.error("❌ Data fetch error:", error);
+    dashboardState.errorCount++;
+    updateConnectionStatus(false, error.message);
+
+    // Try to use last good data if available
+    if (dashboardState.lastData && dashboardState.errorCount < 5) {
+      console.log("📊 Using cached data during connection issues");
+    }
+  }
+
+  updateLastUpdateTime();
+}
+
+function updateDashboard(data) {
+  try {
+    updatePortfolioMetrics(data);
+    updateActivePositions(data.positions, data.market_data);
     updateTradeHistory(data.trade_history);
-    updatePortfolioChart(data);
+    updateMarketData(data.market_data);
     updatePerformanceChart(data);
     updateLearningMetrics(data.learning_metrics);
     updateCostTracking(data.cost_tracking);
-
-    // Store for global use
-    window.data = data;
-
-    // Update connection status
-    document.querySelector(".connection-status").innerHTML =
-      '<span class="status-dot status-live pulse"></span><span class="text-green-400 font-medium">LIVE</span>';
   } catch (error) {
-    console.error("Error fetching data:", error);
-    document.querySelector(".connection-status").innerHTML =
-      '<span class="status-dot status-offline"></span><span class="text-red-400 font-medium">OFFLINE</span>';
+    console.error("❌ Dashboard update error:", error);
   }
 }
 
-function updateSummaryCards(data) {
-  // Update total value (portfolio value from backend)
-  document.getElementById(
-    "total-value"
-  ).textContent = `$${data.total_value.toFixed(2)}`;
+function updatePortfolioMetrics(data) {
+  // Calculate metrics
+  const totalValue = data.total_value || 0;
+  const balance = data.balance || 0;
+  const positions = data.positions || {};
+  const activePositionsCount = Object.keys(positions).length;
 
-  // Update balance (actual USDC/BNFCR balance)
-  document.getElementById("balance").textContent = `$${data.balance.toFixed(
-    2
-  )}`;
+  // Calculate total unrealized P&L
+  let totalUnrealizedPnL = 0;
+  let totalMarginUsed = 0;
 
-  // Update positions count
-  document.getElementById("active-positions").textContent = Object.keys(
-    data.positions || {}
-  ).length;
+  Object.values(positions).forEach((position) => {
+    totalUnrealizedPnL += position.pnl || 0;
+    totalMarginUsed +=
+      (position.notional || 0) / Math.max(1, position.leverage || 1);
+  });
 
-  // Update trades count from trade history length
-  document.getElementById("total-trades").textContent = data.trade_history
-    ? data.trade_history.length
-    : 0;
+  const marginUsagePercent =
+    balance > 0 ? (totalMarginUsed / balance) * 100 : 0;
+
+  // Update UI elements
+  updateElement("total-value", `$${totalValue.toLocaleString()}`);
+  updateElement("balance", `$${balance.toLocaleString()}`);
+  updateElement("active-positions", activePositionsCount.toString());
+
+  // P&L with color coding
+  const pnlElement = document.getElementById("total-pnl");
+  const pnlPercentElement = document.getElementById("pnl-percentage");
+
+  if (pnlElement) {
+    pnlElement.textContent = `$${
+      totalUnrealizedPnL >= 0 ? "+" : ""
+    }${totalUnrealizedPnL.toFixed(2)}`;
+    pnlElement.className = `text-2xl font-bold ${
+      totalUnrealizedPnL >= 0 ? "text-green-400" : "text-red-400"
+    }`;
+  }
+
+  if (pnlPercentElement && balance > 0) {
+    const pnlPercent = (totalUnrealizedPnL / balance) * 100;
+    pnlPercentElement.textContent = `${
+      pnlPercent >= 0 ? "+" : ""
+    }${pnlPercent.toFixed(2)}%`;
+    pnlPercentElement.className = `text-xs ${
+      pnlPercent >= 0 ? "text-green-400" : "text-red-400"
+    }`;
+  }
+
+  // Margin usage
+  updateElement("margin-usage", `${marginUsagePercent.toFixed(1)}%`);
+  const marginProgress = document.getElementById("margin-progress");
+  if (marginProgress) {
+    marginProgress.style.width = `${Math.min(marginUsagePercent, 100)}%`;
+    marginProgress.style.backgroundColor =
+      marginUsagePercent > 80
+        ? "#ef4444"
+        : marginUsagePercent > 60
+        ? "#f59e0b"
+        : "#10b981";
+  }
+
+  // Update learning metrics if available
+  if (data.learning_metrics) {
+    const winRate = data.learning_metrics.win_rate || 0;
+    const totalTrades = data.learning_metrics.total_trades || 0;
+
+    updateElement("win-rate", `${winRate.toFixed(1)}%`);
+    updateElement("total-trades", `${totalTrades} trades`);
+
+    const winRateElement = document.getElementById("win-rate");
+    if (winRateElement) {
+      winRateElement.className = `text-2xl font-bold ${
+        winRate >= 50 ? "text-green-400" : "text-red-400"
+      }`;
+    }
+  }
+
+  // Update positions count badge
+  updateElement("positions-count", `${activePositionsCount} Open`);
+}
+
+function updateActivePositions(positions, marketData) {
+  const tbody = document.getElementById("positions-tbody");
+  if (!tbody) return;
+
+  if (!positions || Object.keys(positions).length === 0) {
+    tbody.innerHTML = `
+            <tr>
+                <td colspan="7" class="text-center py-8 text-gray-500">
+                    <i class="fas fa-chart-line text-2xl mb-2 block opacity-50"></i>
+                    <span class="text-sm">No active positions</span>
+                </td>
+            </tr>`;
+    return;
+  }
+
+  let rowsHTML = "";
+
+  Object.entries(positions).forEach(([symbol, position]) => {
+    const coin = position.coin;
+    const currentPrice = position.mark_price;
+    const entryPrice = position.entry_price;
+    const direction = position.direction;
+    const leverage = position.leverage || 1;
+    const size = Math.abs(position.size || 0);
+    const pnl = position.pnl || 0;
+
+    // Calculate P&L percentage
+    let pnlPercent = 0;
+    if (direction === "LONG") {
+      pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+    } else {
+      pnlPercent = ((entryPrice - currentPrice) / entryPrice) * 100;
+    }
+
+    const pnlColor = pnl >= 0 ? "text-green-400" : "text-red-400";
+    const directionClass =
+      direction === "LONG" ? "long-indicator" : "short-indicator";
+
+    rowsHTML += `
+            <tr class="table-row">
+                <td class="py-3 px-2">
+                    <div class="flex items-center space-x-2">
+                        <div class="w-6 h-6 bg-gradient-to-br from-blue-500 to-blue-700 rounded flex items-center justify-center">
+                            <span class="text-xs font-bold text-white">${coin.slice(
+                              0,
+                              2
+                            )}</span>
+                        </div>
+                        <span class="font-medium">${coin}</span>
+                    </div>
+                </td>
+                <td class="py-3 px-2">
+                    <span class="trading-indicator ${directionClass}">${direction}</span>
+                </td>
+                <td class="py-3 px-2 text-right font-mono text-sm">${size.toFixed(
+                  4
+                )}</td>
+                <td class="py-3 px-2 text-right font-mono text-sm">$${entryPrice.toLocaleString()}</td>
+                <td class="py-3 px-2 text-right font-mono text-sm">$${currentPrice.toLocaleString()}</td>
+                <td class="py-3 px-2 text-right ${pnlColor}">
+                    <div class="font-bold">$${pnl >= 0 ? "+" : ""}${pnl.toFixed(
+      2
+    )}</div>
+                    <div class="text-xs">${
+                      pnlPercent >= 0 ? "+" : ""
+                    }${pnlPercent.toFixed(1)}%</div>
+                </td>
+                <td class="py-3 px-2 text-right font-bold">${leverage}x</td>
+            </tr>`;
+  });
+
+  tbody.innerHTML = rowsHTML;
+}
+
+function updateTradeHistory(tradeHistory) {
+  const tbody = document.getElementById("trades-tbody");
+  if (!tbody) return;
+
+  if (!tradeHistory || tradeHistory.length === 0) {
+    tbody.innerHTML = `
+            <tr>
+                <td colspan="6" class="text-center py-8 text-gray-500">
+                    <i class="fas fa-clock text-2xl mb-2 block opacity-50"></i>
+                    <span class="text-sm">No trades yet</span>
+                </td>
+            </tr>`;
+    return;
+  }
+
+  let rowsHTML = "";
+
+  // Get last 20 trades, most recent first
+  const recentTrades = tradeHistory.slice(-20).reverse();
+
+  recentTrades.forEach((trade) => {
+    // Handle different timestamp formats from your Python code
+    let tradeTime;
+    try {
+      if (trade.timestamp) {
+        tradeTime = new Date(trade.timestamp);
+      } else if (trade.time) {
+        tradeTime = new Date(trade.time);
+      } else if (trade.created_at) {
+        tradeTime = new Date(trade.created_at);
+      } else {
+        tradeTime = new Date();
+      }
+    } catch (e) {
+      tradeTime = new Date();
+    }
+
+    const timeString = tradeTime.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+
+    const dateString = tradeTime.toLocaleDateString();
+
+    // Determine action and color
+    const action =
+      trade.action ||
+      `${trade.direction || "UNKNOWN"} ${
+        trade.pnl !== undefined && trade.pnl !== null ? "CLOSE" : "OPEN"
+      }`;
+    const isLong = action.includes("LONG");
+    const isShort = action.includes("SHORT");
+    const actionColor = isLong
+      ? "text-green-400"
+      : isShort
+      ? "text-red-400"
+      : "text-gray-400";
+    const actionIcon = isLong
+      ? "fa-arrow-up"
+      : isShort
+      ? "fa-arrow-down"
+      : "fa-exchange-alt";
+
+    // Handle P&L display
+    let pnlDisplay = "--";
+    let pnlColor = "text-gray-400";
+
+    if (trade.pnl !== undefined && trade.pnl !== null) {
+      const pnl = parseFloat(trade.pnl);
+      if (!isNaN(pnl)) {
+        pnlDisplay = `$${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`;
+        pnlColor = pnl >= 0 ? "text-green-400" : "text-red-400";
+
+        // Add percentage if available
+        if (trade.pnl_percent !== undefined && trade.pnl_percent !== null) {
+          const pnlPercent = parseFloat(trade.pnl_percent);
+          if (!isNaN(pnlPercent)) {
+            pnlDisplay += `<br><span class="text-xs opacity-70">${
+              pnlPercent >= 0 ? "+" : ""
+            }${pnlPercent.toFixed(1)}%</span>`;
+          }
+        }
+      }
+    }
+
+    // Confidence badge
+    const confidence = trade.confidence || 5;
+    const confColor =
+      confidence >= 8
+        ? "badge-success"
+        : confidence >= 6
+        ? "badge-warning"
+        : "badge-danger";
+
+    rowsHTML += `
+            <tr class="table-row" title="${dateString}">
+                <td class="py-3 px-2 text-xs font-mono text-gray-400">${timeString}</td>
+                <td class="py-3 px-2">
+                    <div class="flex items-center space-x-2">
+                        <div class="w-5 h-5 bg-gradient-to-br from-blue-500 to-blue-700 rounded flex items-center justify-center">
+                            <span class="text-xs font-bold text-white">${(
+                              trade.coin || "XX"
+                            ).slice(0, 2)}</span>
+                        </div>
+                        <span class="font-medium text-sm">${
+                          trade.coin || "UNKNOWN"
+                        }</span>
+                    </div>
+                </td>
+                <td class="py-3 px-2">
+                    <span class="${actionColor} flex items-center text-sm">
+                        <i class="fas ${actionIcon} mr-1"></i>
+                        <span class="text-xs">${action}</span>
+                    </span>
+                </td>
+                <td class="py-3 px-2 text-right font-mono text-sm">
+                    ${
+                      trade.price
+                        ? `$${parseFloat(trade.price).toLocaleString()}`
+                        : "--"
+                    }
+                </td>
+                <td class="py-3 px-2 text-right ${pnlColor} text-sm">${pnlDisplay}</td>
+                <td class="py-3 px-2 text-center">
+                    <span class="badge ${confColor} text-xs">${confidence}/10</span>
+                </td>
+            </tr>`;
+  });
+
+  tbody.innerHTML = rowsHTML;
 }
 
 function updateMarketData(marketData) {
   const container = document.getElementById("market-data");
-  container.innerHTML = "";
+  if (!container) return;
 
   if (!marketData || Object.keys(marketData).length === 0) {
-    container.innerHTML =
-      '<p class="text-gray-400 text-center">Loading market data...</p>';
+    container.innerHTML = `
+            <div class="text-center py-8 text-gray-500">
+                <i class="fas fa-sync fa-spin text-xl mb-2 block"></i>
+                <span class="text-sm">Loading market data...</span>
+            </div>`;
     return;
   }
 
+  let marketHTML = "";
+
+  // Sort by 24h change percentage (highest first)
   const sortedCoins = Object.entries(marketData).sort(
-    (a, b) => b[1].change_24h - a[1].change_24h
+    ([, a], [, b]) => (b.change_24h || 0) - (a.change_24h || 0)
   );
 
   sortedCoins.forEach(([coin, data]) => {
-    const changeColor =
-      data.change_24h >= 0 ? "text-green-400" : "text-red-400";
-    const changeIcon = data.change_24h >= 0 ? "fa-arrow-up" : "fa-arrow-down";
+    const change = data.change_24h || 0;
+    const changeColor = change >= 0 ? "text-green-400" : "text-red-400";
+    const changeIcon = change >= 0 ? "fa-arrow-up" : "fa-arrow-down";
+    const price = data.price || 0;
+    const volume = data.volume || 0;
 
-    const volumeIndicator =
-      data.quote_volume > 100000000
-        ? "🔥"
-        : data.quote_volume > 50000000
-        ? "📊"
-        : "💤";
+    // Volume indicator
+    const volumeLabel =
+      volume > 100000000 ? "🔥 Hot" : volume > 50000000 ? "📈 Good" : "📊 Low";
 
-    container.innerHTML += `
-      <div class="flex items-center justify-between p-3 bg-gray-700/20 rounded-lg hover:bg-gray-700/40 transition-all duration-200 border border-gray-700/30">
-        <div class="flex items-center">
-          <div class="w-8 h-8 bg-gradient-to-br from-blue-500 to-blue-700 rounded-lg flex items-center justify-center mr-3 shadow-lg">
-            <span class="font-bold text-xs text-white">${coin.slice(
-              0,
-              2
-            )}</span>
-          </div>
-          <div>
-            <p class="font-semibold text-sm">${coin}/USDT</p>
-            <p class="text-gray-400 text-xs">$${data.price.toLocaleString()}</p>
-          </div>
-        </div>
-        <div class="text-right">
-          <p class="${changeColor} font-semibold text-sm flex items-center justify-end">
-            <i class="fas ${changeIcon} text-xs mr-1"></i>
-            ${data.change_24h >= 0 ? "+" : ""}${data.change_24h.toFixed(2)}%
-          </p>
-          <p class="text-gray-400 text-xs">
-            Vol: ${(data.volume / 1000000).toFixed(1)}M ${volumeIndicator}
-          </p>
-        </div>
-      </div>
-    `;
-  });
-}
-
-function updatePositions(positions, marketData) {
-  const tbody = document.getElementById("positions-body");
-
-  if (!positions || Object.keys(positions).length === 0) {
-    tbody.innerHTML = `
-      <tr>
-        <td colspan="7" class="text-center py-12 text-gray-400">
-          <div class="flex flex-col items-center">
-            <i class="fas fa-inbox text-3xl mb-3 opacity-50"></i>
-            <span class="text-sm">No active positions</span>
-          </div>
-        </td>
-      </tr>
-    `;
-    return;
-  }
-
-  tbody.innerHTML = "";
-
-  Object.entries(positions).forEach(([symbol, position]) => {
-    const coin = position.coin;
-    const currentPrice = marketData[coin]?.price || position.mark_price;
-    const entryPrice = position.entry_price;
-    const direction = position.direction;
-    const leverage = position.leverage;
-    const notional = position.notional || 0;
-    const positionSize = Math.abs(position.size);
-
-    // Calculate PnL percentage and dollar amount
-    let pnlPercent = 0;
-    let pnlDollar = 0;
-
-    if (direction === "LONG") {
-      pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
-      // For LONG: PnL = (current_price - entry_price) * position_size
-      pnlDollar = (currentPrice - entryPrice) * positionSize;
-    } else {
-      pnlPercent = ((entryPrice - currentPrice) / entryPrice) * 100;
-      // For SHORT: PnL = (entry_price - current_price) * position_size
-      pnlDollar = (entryPrice - currentPrice) * positionSize;
-    }
-
-    // Use backend PnL if available and non-zero, otherwise use calculated
-    const displayPnl =
-      position.pnl && position.pnl !== 0 ? position.pnl : pnlDollar;
-
-    const pnlColor = displayPnl >= 0 ? "text-green-400" : "text-red-400";
-    const directionColor =
-      direction === "LONG" ? "text-green-400" : "text-red-400";
-    const directionIcon =
-      direction === "LONG" ? "fa-arrow-up" : "fa-arrow-down";
-
-    tbody.innerHTML += `
-      <tr class="border-b border-gray-700/30 hover:bg-gray-800/30 transition-colors">
-        <td class="py-3 px-3 font-semibold">
-          <span class="${directionColor} flex items-center">
-            <i class="fas ${directionIcon} mr-1"></i>${direction}
-          </span>
-          <span class="text-white">${coin}</span>
-        </td>
-        <td class="py-3 px-3 font-mono text-sm">${positionSize.toFixed(4)}</td>
-        <td class="py-3 px-3 font-mono text-sm">$${entryPrice.toLocaleString()}</td>
-        <td class="py-3 px-3 font-mono text-sm">$${currentPrice.toLocaleString()}</td>
-        <td class="py-3 px-3 ${pnlColor} font-semibold">
-          $${displayPnl >= 0 ? "+" : ""}${displayPnl.toFixed(2)}
-          <br><span class="text-sm">(${
-            pnlPercent >= 0 ? "+" : ""
-          }${pnlPercent.toFixed(1)}%)</span>
-        </td>
-        <td class="py-3 px-3 text-sm font-bold">${leverage}x</td>
-        <td class="py-3 px-3 text-sm">$${notional.toLocaleString()}</td>
-      </tr>
-    `;
-  });
-}
-
-function updateTradeHistory(tradeHistory) {
-  const tbody = document.getElementById("trades-body");
-
-  if (!tradeHistory || tradeHistory.length === 0) {
-    tbody.innerHTML = `
-      <tr>
-        <td colspan="7" class="text-center py-12 text-gray-400">
-          <div class="flex flex-col items-center">
-            <i class="fas fa-chart-line text-3xl mb-3 opacity-50"></i>
-            <span class="text-sm">No trades yet - AI analyzing markets</span>
-          </div>
-        </td>
-      </tr>
-    `;
-    return;
-  }
-
-  tbody.innerHTML = "";
-
-  // Show last 20 trades, most recent first
-  tradeHistory
-    .slice(-20)
-    .reverse()
-    .forEach((trade) => {
-      const actionColor = trade.action?.includes("LONG")
-        ? "text-green-400"
-        : "text-red-400";
-      const actionIcon = trade.action?.includes("LONG")
-        ? "fa-arrow-up"
-        : "fa-arrow-down";
-
-      const tradeTime = new Date(trade.timestamp || trade.time);
-      const timeString = tradeTime.toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-
-      tbody.innerHTML += `
-      <tr class="border-b border-gray-700/30 hover:bg-gray-800/30 transition-colors">
-        <td class="py-3 px-3 text-sm font-mono">${timeString}</td>
-        <td class="py-3 px-3 font-semibold">${trade.coin}</td>
-        <td class="py-3 px-3 ${actionColor}">
-          <span class="flex items-center">
-            <i class="fas ${actionIcon} mr-1"></i>${
-        trade.action || trade.direction
-      }
-          </span>
-        </td>
-        <td class="py-3 px-3 font-mono text-sm">$${
-          trade.price?.toLocaleString() || "-"
-        }</td>
-        <td class="py-3 px-3 text-sm">${
-          trade.position_size ? `$${trade.position_size.toFixed(2)}` : "-"
-        }</td>
-        <td class="py-3 px-3 text-sm font-bold">${trade.leverage || "-"}x</td>
-        <td class="py-3 px-3 text-center">
-          <span class="text-xs font-semibold px-2 py-1 rounded-full ${
-            (trade.confidence || 5) >= 8
-              ? "bg-green-900/50 text-green-400 border border-green-500/30"
-              : (trade.confidence || 5) >= 6
-              ? "bg-yellow-900/50 text-yellow-400 border border-yellow-500/30"
-              : "bg-red-900/50 text-red-400 border border-red-500/30"
-          }">
-            ${trade.confidence || 5}/10
-          </span>
-        </td>
-      </tr>
-    `;
-    });
-}
-
-function updateLearningMetrics(metrics) {
-  let metricsSection = document.getElementById("learning-metrics-section");
-  if (!metricsSection) {
-    const mainContainer = document.querySelector(".container");
-    const metricsHTML = `
-      <div class="collapsible-content hidden" id="learning-metrics-section" style="display: none;">
-        <div class="compact-card rounded-xl p-5 hover-lift">
-          <h2 class="text-lg font-bold mb-4 text-blue-400 flex items-center">
-            <i class="fas fa-brain mr-2"></i>AI Learning Metrics
-          </h2>
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="learning-metrics">
-          </div>
-        </div>
-      </div>
-    `;
-    mainContainer.insertAdjacentHTML("beforeend", metricsHTML);
-  }
-
-  const metricsContainer = document.getElementById("learning-metrics");
-  if (metrics && metricsContainer) {
-    metricsContainer.innerHTML = `
-      <div class="text-center bg-gray-700/30 rounded-lg p-3">
-        <p class="text-lg font-bold ${
-          (metrics.win_rate || 0) >= 50 ? "text-green-400" : "text-red-400"
-        }">${(metrics.win_rate || 0).toFixed(1)}%</p>
-        <p class="text-gray-400 text-xs">Win Rate</p>
-      </div>
-      <div class="text-center bg-gray-700/30 rounded-lg p-3">
-        <p class="text-lg font-bold text-yellow-400">${
-          metrics.best_leverage || 15
-        }x</p>
-        <p class="text-gray-400 text-xs">Best Leverage</p>
-      </div>
-      <div class="text-center bg-gray-700/30 rounded-lg p-3">
-        <p class="text-lg font-bold text-blue-400">${
-          metrics.total_trades || 0
-        }</p>
-        <p class="text-gray-400 text-xs">Total Trades</p>
-      </div>
-      <div class="text-center bg-gray-700/30 rounded-lg p-3">
-        <p class="text-lg font-bold text-purple-400">
-          ${(
-            (metrics.avg_profit || 0) - Math.abs(metrics.avg_loss || 0)
-          ).toFixed(2)}
-        </p>
-        <p class="text-gray-400 text-xs">Avg P&L</p>
-      </div>
-    `;
-  }
-}
-
-function updateCostTracking(costData) {
-  if (!costData) return;
-
-  let costSection = document.getElementById("cost-tracking-section");
-  if (!costSection) {
-    const mainContainer = document.querySelector(".container");
-    const costHTML = `
-      <div class="collapsible-content hidden" id="cost-tracking-section" style="display: none;">
-        <div class="compact-card rounded-xl p-5 hover-lift">
-          <h2 class="text-lg font-bold mb-4 text-yellow-400 flex items-center">
-            <i class="fas fa-dollar-sign mr-2"></i>Service Costs & Projections
-          </h2>
-          
-          <div class="mb-6">
-            <h3 class="text-base font-semibold text-gray-300 mb-3">Current Session</h3>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="current-costs">
-            </div>
-          </div>
-          
-          <div>
-            <h3 class="text-base font-semibold text-gray-300 mb-3">Projected Costs</h3>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="cost-projections">
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-
-    mainContainer.insertAdjacentHTML("beforeend", costHTML);
-  }
-
-  const currentCosts = document.getElementById("current-costs");
-  if (currentCosts) {
-    currentCosts.innerHTML = `
-      <div class="text-center bg-gray-700/30 rounded-lg p-3">
-        <p class="text-lg font-bold text-blue-400">$${
-          costData.current?.openai?.toFixed(4) || "0.0000"
-        }</p>
-        <p class="text-gray-400 text-xs">OpenAI</p>
-      </div>
-      <div class="text-center bg-gray-700/30 rounded-lg p-3">
-        <p class="text-lg font-bold text-purple-400">$${
-          costData.current?.railway?.toFixed(4) || "0.0000"
-        }</p>
-        <p class="text-gray-400 text-xs">Railway</p>
-      </div>
-      <div class="text-center bg-gray-700/30 rounded-lg p-3">
-        <p class="text-lg font-bold text-yellow-400">$${
-          costData.current?.total?.toFixed(4) || "0.0000"
-        }</p>
-        <p class="text-gray-400 text-xs">Total</p>
-      </div>
-      <div class="text-center bg-gray-700/30 rounded-lg p-3">
-        <p class="text-lg font-bold text-cyan-400">${
-          costData.current?.api_calls || 0
-        }</p>
-        <p class="text-gray-400 text-xs">API Calls</p>
-      </div>
-    `;
-  }
-
-  const projections = document.getElementById("cost-projections");
-  if (projections && costData.projections) {
-    projections.innerHTML = `
-      <div class="bg-gradient-to-br from-blue-900/50 to-blue-800/50 rounded-lg p-4 border border-blue-500/20">
-        <h4 class="text-sm font-semibold text-gray-300 mb-2">Weekly Estimate</h4>
-        <p class="text-xl font-bold text-white">$${
-          costData.projections.weekly?.total?.toFixed(2) || "0.00"
-        }</p>
-        <p class="text-xs text-gray-300">OpenAI: $${
-          costData.projections.weekly?.openai?.toFixed(2) || "0.00"
-        }</p>
-        <p class="text-xs text-gray-300">Railway: $${
-          costData.projections.weekly?.railway?.toFixed(2) || "0.00"
-        }</p>
-      </div>
-      
-      <div class="bg-gradient-to-br from-purple-900/50 to-purple-800/50 rounded-lg p-4 border border-purple-500/20">
-        <h4 class="text-sm font-semibold text-gray-300 mb-2">Monthly Estimate</h4>
-        <p class="text-xl font-bold text-white">$${
-          costData.projections.monthly?.total?.toFixed(2) || "0.00"
-        }</p>
-        <p class="text-xs text-gray-300">OpenAI: $${
-          costData.projections.monthly?.openai?.toFixed(2) || "0.00"
-        }</p>
-        <p class="text-xs text-gray-300">Railway: $${
-          costData.projections.monthly?.railway?.toFixed(2) || "0.00"
-        }</p>
-      </div>
-    `;
-  }
-}
-
-function updatePortfolioChart(data) {
-  if (!portfolioChart) return;
-
-  const positions = Object.values(data.positions || {});
-  const labels = ["Cash"];
-  const values = [data.balance || 0];
-  const colors = ["#60a5fa"];
-
-  positions.forEach((position, index) => {
-    labels.push(`${position.coin} ${position.direction}`);
-    values.push(Math.abs(position.size * position.mark_price) || 0);
-    colors.push(getColorForIndex(index));
+    marketHTML += `
+            <div class="flex items-center justify-between p-3 bg-gray-800/20 rounded-lg hover:bg-gray-800/40 transition-all duration-200 border border-gray-700/20 hover:border-blue-500/30">
+                <div class="flex items-center space-x-3">
+                    <div class="w-8 h-8 bg-gradient-to-br from-blue-500 to-blue-700 rounded-lg flex items-center justify-center shadow-lg">
+                        <span class="font-bold text-xs text-white">${coin.slice(
+                          0,
+                          2
+                        )}</span>
+                    </div>
+                    <div>
+                        <p class="font-semibold text-sm">${coin}/USDT</p>
+                        <p class="text-gray-400 text-xs">$${price.toLocaleString()}</p>
+                    </div>
+                </div>
+                <div class="text-right">
+                    <p class="${changeColor} font-semibold text-sm flex items-center justify-end">
+                        <i class="fas ${changeIcon} text-xs mr-1"></i>
+                        ${change >= 0 ? "+" : ""}${change.toFixed(2)}%
+                    </p>
+                    <p class="text-gray-400 text-xs">
+                        ${volumeLabel} ${(volume / 1000000).toFixed(1)}M
+                    </p>
+                </div>
+            </div>`;
   });
 
-  portfolioChart.data.labels = labels;
-  portfolioChart.data.datasets[0].data = values;
-  portfolioChart.data.datasets[0].backgroundColor = colors;
-  portfolioChart.update();
+  container.innerHTML = marketHTML;
 }
 
 function updatePerformanceChart(data) {
   if (!performanceChart) return;
 
-  const currentTime = new Date().toLocaleTimeString();
+  const currentTime = new Date();
   const currentValue = data.total_value || 0;
 
-  // Add to history
+  // Add to portfolio history
   portfolioHistory.push({
-    time: currentTime,
+    time: currentTime.toLocaleTimeString(),
     value: currentValue,
-    timestamp: Date.now(),
+    timestamp: currentTime.getTime(),
   });
 
-  // Keep only last 50 data points
+  // Keep only last 50 points
   if (portfolioHistory.length > 50) {
     portfolioHistory = portfolioHistory.slice(-50);
   }
 
-  // Update chart with historical data
+  // Update chart
   performanceChart.data.labels = portfolioHistory.map((h) => h.time);
   performanceChart.data.datasets[0].data = portfolioHistory.map((h) => h.value);
-  performanceChart.update();
+  performanceChart.update("none"); // No animation for smoother updates
 }
 
-function getColorForIndex(index) {
-  const colors = [
-    "#f87171",
-    "#fb923c",
-    "#fbbf24",
-    "#a3e635",
-    "#34d399",
-    "#22d3ee",
-    "#60a5fa",
-    "#a78bfa",
-    "#f472b6",
-    "#fb7185",
-  ];
-  return colors[index % colors.length];
+function updateLearningMetrics(metrics) {
+  if (!metrics) return;
+
+  const avgHoldTime = calculateAverageHoldTime();
+  const bestLeverage = metrics.best_leverage || 15;
+
+  updateElement("avg-hold-time", avgHoldTime);
+  updateElement("best-leverage", `${bestLeverage}x`);
 }
+
+function updateCostTracking(costData) {
+  if (!costData) return;
+
+  const current = costData.current || {};
+  const projections = costData.projections || {};
+
+  updateElement("openai-cost", `$${(current.openai || 0).toFixed(4)}`);
+  updateElement("railway-cost", `$${(current.railway || 0).toFixed(4)}`);
+  updateElement(
+    "monthly-projection",
+    `$${(projections.monthly?.total || 0).toFixed(2)}`
+  );
+}
+
+// Utility Functions
+function updateElement(id, value) {
+  const element = document.getElementById(id);
+  if (element) {
+    element.textContent = value;
+  }
+}
+
+function updateConnectionStatus(isConnected, errorMessage = "") {
+  const statusElement = document.getElementById("connection-status");
+  if (!statusElement) return;
+
+  dashboardState.isConnected = isConnected;
+
+  if (isConnected) {
+    statusElement.innerHTML = `
+            <div class="status-indicator status-live"></div>
+            <span class="text-green-400 font-medium">CONNECTED</span>`;
+  } else {
+    statusElement.innerHTML = `
+            <div class="status-indicator status-offline"></div>
+            <span class="text-red-400 font-medium">OFFLINE</span>`;
+
+    if (errorMessage) {
+      console.error("Connection error:", errorMessage);
+    }
+  }
+}
+
+function updateLastUpdateTime() {
+  const element = document.getElementById("last-update");
+  if (element) {
+    const now = new Date();
+    element.textContent = `Last update: ${now.toLocaleTimeString()}`;
+  }
+  lastUpdateTime = Date.now();
+}
+
+function calculateAverageHoldTime() {
+  // This would need to be calculated from trade history
+  // For now, return a placeholder
+  return "--";
+}
+
+// Error handling and cleanup
+window.addEventListener("beforeunload", () => {
+  if (updateInterval) {
+    clearInterval(updateInterval);
+  }
+});
+
+// Export for debugging
+window.dashboardDebug = {
+  state: dashboardState,
+  portfolioHistory,
+  fetchData,
+  updateDashboard,
+};
