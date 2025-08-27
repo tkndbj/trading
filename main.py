@@ -5,7 +5,6 @@ from collections import deque
 from decimal import Decimal, ROUND_DOWN
 
 import requests
-import numpy as np
 from flask import Flask, jsonify, send_from_directory
 import random
 
