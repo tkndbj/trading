@@ -5,8 +5,18 @@ from collections import deque
 from decimal import Decimal, ROUND_DOWN
 
 import requests
+import numpy as np
 from flask import Flask, jsonify, send_from_directory
 import random
+
+# ============== OpenAI (opsiyonel) ==============
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+
+api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=api_key) if (OpenAI and api_key) else None
 
 # ============== Binance API ==============
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
