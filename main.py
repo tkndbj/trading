@@ -102,11 +102,12 @@ def q_qty(sym, qty_float):
     return float(val)
 
 def meets_min_notional(sym, price_float, qty_float):
-    info = _symbol_info[sym]
-    if not info["minNotional"]:
-        return True
+    info = _symbol_info.get(sym, {})
+    min_notional = info.get("minNotional")
+    if min_notional is None:
+        min_notional = Decimal("5")
     notional = Decimal(str(price_float)) * Decimal(str(qty_float))
-    return notional >= info["minNotional"]
+    return notional >= min_notional
 
 # ============== Portföy & sabitler ==============
 QUICK_CHECK_INTERVAL = 15
@@ -327,23 +328,36 @@ def get_multi_timeframe_data(symbol):
     return out
 
 def get_order_book_analysis(symbol):
-    """Futures order book (notional-normalize)"""
+    """Futures order book (notional-normalize, robust to 2-elem entries)."""
     try:
-        data = binance_request("/fapi/v1/depth","GET",params={"symbol":symbol,"limit":100})
-        bids = [[float(p), float(q)] for p,q,_ in data.get("bids",[])[:20]]
-        asks = [[float(p), float(q)] for p,q,_ in data.get("asks",[])[:20]]
+        data = binance_request("/fapi/v1/depth", "GET", params={"symbol": symbol, "limit": 100})
+        raw_bids = data.get("bids", [])[:20]
+        raw_asks = data.get("asks", [])[:20]
+
+        # futures returns [price, qty] — but be defensive
+        def _pairs(raw):
+            out = []
+            for row in raw:
+                if len(row) >= 2:
+                    out.append([float(row[0]), float(row[1])])
+            return out
+
+        bids = _pairs(raw_bids)
+        asks = _pairs(raw_asks)
         if not bids or not asks:
-            return {"liquidity_score":50, "imbalance_ratio":1.0, "spread":0}
+            return {"liquidity_score": 50, "imbalance_ratio": 1.0, "spread": 0}
 
         best_bid = bids[0][0]
         best_ask = asks[0][0]
-        spread_pct = ((best_ask - best_bid) / best_bid) * 100
+        spread_pct = ((best_ask - best_bid) / best_bid) * 100 if best_bid else 0.0
 
-        bid_notional = sum(p*q for p,q in bids[:10])
-        ask_notional = sum(p*q for p,q in asks[:10])
+        bid_notional = sum(p * q for p, q in bids[:10])
+        ask_notional = sum(p * q for p, q in asks[:10])
         total_notional = bid_notional + ask_notional
-        imbalance = bid_notional / ask_notional if ask_notional>0 else 1.0
-        liq_score = min(100, (total_notional/1_000_000)*100)  # kaba norm
+        imbalance = (bid_notional / ask_notional) if ask_notional > 0 else 1.0
+
+        # simple normalization (tweak as you like)
+        liq_score = min(100.0, (total_notional / 1_000_000.0) * 100.0)
 
         return {
             "liquidity_score": liq_score,
@@ -354,7 +368,8 @@ def get_order_book_analysis(symbol):
         }
     except Exception as e:
         print(f"Orderbook error: {e}")
-        return {"liquidity_score":50, "imbalance_ratio":1.0, "spread":0}
+        return {"liquidity_score": 50, "imbalance_ratio": 1.0, "spread": 0}
+
 
 # ============== Göstergeler / Analizler (mevcut mantığın iyileştirilmiş hali) ==============
 def calculate_atr(highs, lows, closes, period=14):
@@ -688,23 +703,37 @@ def close_futures_position(symbol):
 def set_stop_loss_take_profit(symbol, stop_price, take_profit_price, position_side):
     try:
         positions = get_open_positions()
-        if symbol not in positions: return None
+        if symbol not in positions:
+            return None
         qty = abs(positions[symbol]["size"])
-        sl_side = "SELL" if position_side=="LONG" else "BUY"
-        tp_side = sl_side  # TP de reduceOnly SELL/BUY
+        qty = q_qty(symbol, qty)
+
+        sl_side = "SELL" if position_side == "LONG" else "BUY"
+        tp_side = sl_side
 
         sl_order = binance_request("/fapi/v1/order","POST",signed=True,params={
-            "symbol":symbol,"side":sl_side,"type":"STOP_MARKET","stopPrice":q_price(symbol,stop_price),
-            "workingType":"MARK_PRICE","reduceOnly":True
+            "symbol": symbol,
+            "side": sl_side,
+            "type": "STOP_MARKET",
+            "quantity": qty,
+            "stopPrice": q_price(symbol, stop_price),
+            "workingType": "MARK_PRICE",
+            "reduceOnly": True
         })
         tp_order = binance_request("/fapi/v1/order","POST",signed=True,params={
-            "symbol":symbol,"side":tp_side,"type":"TAKE_PROFIT_MARKET","stopPrice":q_price(symbol,take_profit_price),
-            "workingType":"MARK_PRICE","reduceOnly":True
+            "symbol": symbol,
+            "side": tp_side,
+            "type": "TAKE_PROFIT_MARKET",
+            "quantity": qty,
+            "stopPrice": q_price(symbol, take_profit_price),
+            "workingType": "MARK_PRICE",
+            "reduceOnly": True
         })
-        return {"stop_loss":sl_order,"take_profit":tp_order}
+        return {"stop_loss": sl_order, "take_profit": tp_order}
     except Exception as e:
         print(f"SL/TP error: {e}")
         return None
+
 
 # ============== AI hafıza / maliyet ==============
 cost_tracker = {'openai_tokens':0,'openai_cost':0.0,'api_calls_count':0,'railway_start_time':datetime.now(),'daily_costs':[],'last_reset':datetime.now()}
@@ -958,57 +987,82 @@ REASON: [short]
         return None
 
 def execute_real_trade(coin, trade_params, current_price):
-    if trade_params["direction"]=="SKIP": return
+    if trade_params["direction"] == "SKIP":
+        return False
     try:
         symbol = f"{coin}USDT"
-        # Eşik mantığı (düzeltildi)
-        score = trade_params.get("overall_score", 50)
-        if trade_params["direction"]=="LONG" and score < 65:
-            print("Reject LONG: score < 65"); return
-        if trade_params["direction"]=="SHORT" and score > 35:
-            print("Reject SHORT: score > 35"); return
 
+        # Score gates
+        score = trade_params.get("overall_score", 50)
+        if trade_params["direction"] == "LONG" and score < 65:
+            print("Reject LONG: score < 65")
+            return False
+        if trade_params["direction"] == "SHORT" and score > 35:
+            print("Reject SHORT: score > 35")
+            return False
+
+        # Portfolio/risk
         prisk = calculate_portfolio_risk()
         if not prisk["can_trade"]:
-            print(f"❌ Cannot trade: {prisk['reason']}"); return
-        balance = prisk["balance"]; current_positions = get_open_positions()
+            print(f"❌ Cannot trade: {prisk['reason']}")
+            return False
+        balance = prisk["balance"]
+        current_positions = get_open_positions()
 
+        # Sizing
         sizing = get_dynamic_position_size(len(current_positions), trade_params["confidence"], balance)
-        position_value = sizing["position_value"]; leverage = trade_params["leverage"]
-        if position_value < 5:
-            print(f"❌ Position value too small: ${position_value:.2f}"); return
+        position_value = sizing["position_value"]
+        leverage = trade_params["leverage"]
 
+        # Qty/notional
         notional = position_value * leverage
         qty = notional / current_price
         qty = q_qty(symbol, qty)
         if qty <= 0:
-            print("❌ Qty rounded to zero"); return
+            print("❌ Qty rounded to zero")
+            return False
 
-        # minNotional kontrol
-        if not meets_min_notional(symbol, current_price, qty):
-            print("❌ Below MIN_NOTIONAL"); return
+        # minNotional check (with fallback)
+        min_notional = _symbol_info.get(symbol, {}).get("minNotional")
+        if min_notional is None:
+            min_notional = Decimal("5")
+        computed_notional = Decimal(str(current_price)) * Decimal(str(qty))
+        if computed_notional < min_notional:
+            print(f"❌ Below MIN_NOTIONAL: notional={float(computed_notional):.4f} < {float(min_notional):.4f}")
+            return False
 
-        print(f"📊 Position #{len(current_positions)+1}: {trade_params['direction']} {coin} | qty={qty}")
-        res = place_futures_order(symbol, "BUY" if trade_params["direction"]=="LONG" else "SELL", qty, leverage)
+        print(f"📊 Opening #{len(current_positions)+1}: {trade_params['direction']} {coin} "
+              f"| qty={qty} | price≈{current_price:.6f} | notional≈{float(computed_notional):.2f} | lev={leverage}x")
+
+        # Place market order
+        side = "BUY" if trade_params["direction"] == "LONG" else "SELL"
+        res = place_futures_order(symbol, side, qty, leverage)
         if not res:
-            print(f"❌ Order failed for {symbol}"); return
+            print(f"❌ Order failed for {symbol}")
+            return False
 
+        # Place SL/TP (reduceOnly, MARK_PRICE)
         set_stop_loss_take_profit(symbol, trade_params["stop_loss"], trade_params["take_profit"], trade_params["direction"])
-        save_ai_decision(coin, trade_params)
 
+        # Save AI decision & trade row
+        save_ai_decision(coin, trade_params)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         pid = f"{symbol}_{ts.replace(' ','_').replace(':','-')}"
         db_execute("""
             INSERT OR REPLACE INTO trades (timestamp,position_id,coin,action,direction,price,position_size,leverage,
             notional_value,stop_loss,take_profit,confidence,reason)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (ts,pid,coin,f"{trade_params['direction']} OPEN",trade_params["direction"],current_price,position_value,
-              leverage, notional, trade_params["stop_loss"], trade_params["take_profit"], trade_params["confidence"],
-              trade_params.get("reasoning","")))
+        """, (ts, pid, coin, f"{trade_params['direction']} OPEN", trade_params["direction"], current_price,
+              position_value, leverage, float(computed_notional), trade_params["stop_loss"],
+              trade_params["take_profit"], trade_params["confidence"], trade_params.get("reasoning","")))
 
         print(f"✅ EXECUTED: {coin} {trade_params['direction']} {qty} @ {leverage}x")
+        return True
+
     except Exception as e:
         print(f"Trade exec error: {e}")
+        return False
+
 
 # ============== Pozisyon izleme & çıkış ==============
 def calculate_trailing_stop(position_data, multi_tf_data, atr):
@@ -1175,7 +1229,8 @@ def run_enhanced_bot():
     print(f"✅ Connected | Balance: ${balance:.2f}")
 
     target_coins = ['BTC','ETH','SOL','BNB','SEI','DOGE','TIA','TAO','ARB','SUI','ENA','FET']
-    last_full = 0; iteration = 0
+    last_full = 0
+    iteration = 0
 
     while True:
         try:
@@ -1187,6 +1242,7 @@ def run_enhanced_bot():
                 print("\n" + "="*80)
                 print(f"🧠 ANALYSIS #{iteration} @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 print("="*80)
+
                 current_balance = get_futures_balance()
                 portfolio["balance"] = current_balance
                 portfolio["positions"] = current_positions
@@ -1201,15 +1257,18 @@ def run_enhanced_bot():
                 print("\n📊 Market Overview:")
                 for coin in target_coins[:6]:
                     if coin in md:
-                        price = md[coin]["price"]; sym=f"{coin}USDT"
+                        price = md[coin]["price"]
+                        sym = f"{coin}USDT"
                         tf = get_multi_timeframe_data(sym)
                         ana = get_comprehensive_analysis(sym, {coin: md[coin]}, tf)
                         regime = detect_market_regime(tf, price)["regime"]
-                        trend = "🚀" if regime=="TRENDING_UP" else "📉" if regime=="TRENDING_DOWN" else "↔️" if regime=="RANGING" else "❓"
+                        trend = "🚀" if regime == "TRENDING_UP" else "📉" if regime == "TRENDING_DOWN" else "↔️" if regime == "RANGING" else "❓"
                         pos_info = ""
                         if sym in current_positions:
-                            pos = current_positions[sym]; pos_info=f" [{pos['direction']} {pos['pnl']:+.1f}]"
-                        score=ana["overall_score"]; emoji = "🟢" if score>65 else "🔴" if score<35 else "🟡"
+                            pos = current_positions[sym]
+                            pos_info = f" [{pos['direction']} {pos['pnl']:+.1f}]"
+                        score = ana["overall_score"]
+                        emoji = "🟢" if score > 65 else "🔴" if score < 35 else "🟡"
                         print(f"   {coin}: ${price:.2f} {trend} ({md[coin]['change_24h']:+.1f}%) Score:{score:.0f} {emoji}{pos_info}")
 
                 prisk = calculate_portfolio_risk()
@@ -1217,36 +1276,47 @@ def run_enhanced_bot():
                     insights = get_learning_insights()
                     print("\n🤖 Opportunity Scan:")
                     print(f"   Portfolio {prisk['positions_count']}/{MAX_CONCURRENT_POSITIONS} | Avail ${prisk['available_balance']:.2f} | Margin {prisk['margin_ratio']*100:.1f}% | Win {insights['win_rate']:.1f}%")
-                    coin_scores=[]
+
+                    coin_scores = []
                     for coin in target_coins:
-                        sym=f"{coin}USDT"
-                        if sym in current_positions: continue
+                        if coin not in md:
+                            continue  # safety: skip coins missing from tickers
+                        sym = f"{coin}USDT"
+                        if sym in current_positions:
+                            continue
                         tf = get_multi_timeframe_data(sym)
                         ana = get_comprehensive_analysis(sym, md, tf)
-                        if ana["overall_score"]>65 or ana["overall_score"]<35:
+                        if ana["overall_score"] > 65 or ana["overall_score"] < 35:
                             coin_scores.append((coin, ana["overall_score"], ana, tf))
-                    coin_scores.sort(key=lambda x: abs(x[1]-50), reverse=True)
+
+                    coin_scores.sort(key=lambda x: abs(x[1] - 50), reverse=True)
                     max_new = min(3, MAX_CONCURRENT_POSITIONS - prisk["positions_count"])
                     executed = 0
-                    for i,(coin,score,ana,tf) in enumerate(coin_scores[:max_new]):
+
+                    for i, (coin, score, ana, tf) in enumerate(coin_scores[:max_new]):
                         print(f"\n   📊 Candidate #{i+1}: {coin} Score {score:.1f} Dir {ana['direction']}")
                         tp = ai_trade_decision(coin, md, tf, insights)
-                        if tp and tp["direction"]!="SKIP":
-                            print(f"      AI: {tp['direction']} conf {tp['confidence']}/10 rr≈1:{tp.get('tp_percentage',0)/max(1e-6,tp.get('sl_percentage',1)):.1f}")
-                            if tp["confidence"]>=MIN_CONFIDENCE_THRESHOLD:
-                                rr = tp.get("tp_percentage",0)/max(1e-6,tp.get("sl_percentage",1))
-                                if rr>=1.8:
-                                    execute_real_trade(coin, tp, md[coin]["price"])
-                                    executed += 1
-                                    time.sleep(1)
+                        if tp and tp["direction"] != "SKIP":
+                            rr_disp = tp.get("tp_percentage", 0) / max(1e-6, tp.get("sl_percentage", 1))
+                            print(f"      AI: {tp['direction']} conf {tp['confidence']}/10 rr≈1:{rr_disp:.1f}")
+                            if tp["confidence"] >= MIN_CONFIDENCE_THRESHOLD:
+                                rr = rr_disp
+                                if rr >= 1.8:
+                                    ok = execute_real_trade(coin, tp, md[coin]["price"])
+                                    if ok:
+                                        executed += 1
+                                        time.sleep(1)
+                                    else:
+                                        print("      ⚠️ Trade not executed (rejected or failed)")
                                 else:
                                     print("      ⏭️ Low R/R")
                             else:
                                 print("      ⏭️ Low confidence")
                         else:
                             print("      ⏭️ AI says SKIP")
-                    if executed==0:
-                        print(f"   No suitable opportunities.")
+
+                    if executed == 0:
+                        print("   No suitable opportunities.")
                     else:
                         print(f"   🎯 Executed {executed} trade(s)")
                 else:
@@ -1262,12 +1332,16 @@ def run_enhanced_bot():
                 print(f"   Session Costs: ${cost_data['current']['total']:.4f}")
                 last_full = now
                 print("="*80)
+
             time.sleep(QUICK_CHECK_INTERVAL)
+
         except KeyboardInterrupt:
-            print("\n🛑 Stopped by user"); break
+            print("\n🛑 Stopped by user")
+            break
         except Exception as e:
             print(f"\n❌ Loop error: {e}")
             time.sleep(QUICK_CHECK_INTERVAL)
+
 
 # ============== Main ==============
 if __name__ == "__main__":
