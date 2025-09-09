@@ -590,27 +590,29 @@ class InstitutionalPatternDetector:
         # Iceberg order detection (large orders hidden in small sizes)
         liquidity_score = orderbook_data.get("liquidity_score", 50)
         imbalance = orderbook_data.get("imbalance_ratio", 1.0)
-        
         if liquidity_score > 80 and abs(imbalance - 1.0) < 0.1:
             patterns["iceberg_detected"] = True
             
-        # Block trade detection (unusually large volume)
-        volume_24h = market_data.get("volume", 0)
-        if volume_24h > 0:
-            current_volume_rate = volume_24h / (24 * 60)  # per minute average
-            if current_volume_rate > volume_24h / (24 * 60) * 3:  # 3x normal
-                patterns["block_trades"] = True
+        # ---- Block trade proxy (birim uyumu)
+        price = float(market_data.get("price", 0.0) or 0.0)
+        volume_24h = float(market_data.get("volume", 0.0) or 0.0)          # <-- eksikti
+        quote_vol = float(market_data.get("quote_volume", 0.0) or 0.0)
+        base_vol_est = (quote_vol / max(price, 1e-9)) if price > 0 else 0.0
+        # "yüksek göreli hacim" + "sıkı spread" beraber ise block trades ihtimali
+        if base_vol_est > 1.5 * volume_24h and orderbook_data.get("spread", 100) < 0.02:
+            patterns["block_trades"] = True
                 
-        # Liquidity hunting (rapid price moves with low volume)
-        price_change = abs(market_data.get("change_24h", 0))
-        if price_change > 5 and volume_24h < market_data.get("quote_volume", 0) * 0.8:
+        # ---- Liquidity hunting proxy
+        price_change = abs(float(market_data.get("change_24h", 0.0) or 0.0))
+        if price_change > 5 and liquidity_score < 30:
             patterns["liquidity_hunting"] = True
-            
-        # Momentum ignition (sudden volume spike with price acceleration)
-        if volume_24h > market_data.get("quote_volume", 0) * 1.5 and price_change > 3:
+
+        # ---- Momentum ignition proxy: spread çok düşük + dengesizlik yüksek + anlamlı değişim
+        if orderbook_data.get("spread", 99) < 0.02 and abs(imbalance - 1.0) > 0.5 and price_change > 2:
             patterns["momentum_ignition"] = True
             
         return patterns
+
         
     def calculate_pattern_strength(self, patterns, historical_success):
         """Calculate overall pattern strength based on historical performance"""
@@ -729,7 +731,7 @@ def ai_trade_decision_ml(coin, market_data, multi_tf_data, learning_insights):
         tp_pct = abs(tp - current_price) / current_price * 100
         
         # Ensure minimum risk/reward
-        if tp_pct / max(sl_pct, 0.1) < 1.7:
+        if tp_pct / max(sl_pct, 0.1) < 1.5:
             return {"direction": "SKIP", "reason": "RR ratio too low"}
             
         # Dynamic leverage based on ML confidence and patterns
@@ -847,26 +849,25 @@ def update_ml_models_on_trade_close(coin, direction, pnl_percent, features_hash)
             ml_model = ai_trade_decision_ml.ml_model
             pattern_detector = ai_trade_decision_ml.pattern_detector
             
-            # Retrieve features from database
+            # En son feature set'ini al (hash'a bağlı kalma)
             rows = db_execute("""
                 SELECT features_json, regime FROM ml_features 
-                WHERE coin=? AND features_json LIKE ? 
+                WHERE coin=? 
                 ORDER BY timestamp DESC LIMIT 1
-            """, (coin, f'%{features_hash}%'), fetch=True)
+            """, (coin,), fetch=True)
             
             if rows:
                 features_json, regime = rows[0]
                 features = np.array(json.loads(features_json))
-                
-                # Normalize outcome to [-1, 1] range for learning
-                normalized_outcome = np.tanh(pnl_percent / 10.0)  # 10% = ~0.76, 5% = ~0.46
-                
+
+                # Normalize outcome to [-1, 1]
+                normalized_outcome = np.tanh(pnl_percent / 10.0)
+
                 # Update the model
                 ml_model.update_model(features, normalized_outcome, regime)
-                
                 print(f"📚 Updated ML model: {coin} {direction} -> {pnl_percent:.1f}% (regime: {regime})")
-                
-        # Update pattern detector if we have pattern data
+
+        # Pattern öğrenmesi (mevcut mantığı koruyoruz)
         rows = db_execute("""
             SELECT reasoning FROM ai_decisions 
             WHERE coin=? AND direction=? AND outcome_pnl IS NULL
@@ -874,16 +875,14 @@ def update_ml_models_on_trade_close(coin, direction, pnl_percent, features_hash)
         """, (coin, direction), fetch=True)
         
         if rows and "Patterns:" in rows[0][0]:
-            # Extract pattern information and update success rates
-            # This is simplified - in production you'd store patterns more systematically
             if hasattr(ai_trade_decision_ml, 'pattern_detector'):
-                # Simulate pattern outcome learning
                 pattern_detector = ai_trade_decision_ml.pattern_detector
-                dummy_patterns = {"momentum_ignition": True}  # Would be actual detected patterns
+                dummy_patterns = {"momentum_ignition": True}
                 pattern_detector.learn_pattern_outcome(dummy_patterns, pnl_percent)
-                
+
     except Exception as e:
         print(f"ML model update error: {e}")
+
 
 # ============== Enhanced Position Monitoring ==============
 def calculate_ml_exit_signal(position_data, multi_tf_data):
@@ -1130,7 +1129,7 @@ def save_ai_decision(coin, trade_params):
     """, (coin, trade_params["direction"], trade_params["confidence"], 
           (trade_params.get("reasoning") or "")[:200], trade_params.get("market_regime","UNKNOWN"),
           trade_params.get("ml_confidence", 0.5), trade_params.get("pattern_strength", 0.0),
-          trade_params.get("regime", "unknown"), trade_params.get("features_hash", ""),
+          trade_params.get("market_regime", "unknown"), trade_params.get("features_hash", ""),
           datetime.now().isoformat()))
 
 def update_ai_decision_outcome(coin, direction, pnl_percent):
@@ -1358,11 +1357,13 @@ def execute_ml_trade(coin, trade_params, current_price, bullish_thr=65.0, bearis
             if effective_score < bullish_thr:
                 print(f"Reject LONG: score {effective_score:.1f} < gate {bullish_thr:.1f} (ML boost: {ml_boost:.1f})")
                 return False
+
         elif trade_params["direction"] == "SHORT":
             ml_boost = ml_confidence * pattern_strength * 10
-            effective_score = score - ml_boost  # Subtract for short
-            if effective_score > bearish_thr:
-                print(f"Reject SHORT: score {effective_score:.1f} > gate {bearish_thr:.1f} (ML boost: -{ml_boost:.1f})")
+            # SHORT'ta long-odaklı skoru ters çevirerek değerlendiriyoruz
+            short_score = (100.0 - score) + ml_boost
+            if short_score < bearish_thr:
+                print(f"Reject SHORT: short_score {short_score:.1f} < gate {bearish_thr:.1f} (ML boost: +{ml_boost:.1f})")
                 return False
 
         # Enhanced risk management
@@ -1764,7 +1765,7 @@ def run_ml_enhanced_bot():
                             pattern_strength = tp.get("pattern_strength", 0.0)
                             
                             # Aggressive filtering - only high-confidence ML signals
-                            if ml_confidence > 0.65 or pattern_strength > 0.3:
+                            if ml_confidence > 0.55 or pattern_strength > 0.20:
                                 ml_candidates.append((coin, tp, ml_confidence, pattern_strength))
 
                     # Sort by combined ML score
