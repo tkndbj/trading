@@ -439,7 +439,7 @@ def bootstrap_trade_decision(coin, market_data, multi_tf_data):
         sl = current_price * (1 + sl_pct/100)
         tp = current_price * (1 - tp_pct/100)
     
-    return {
+    result = {
         "direction": direction,
         "leverage": leverage,
         "position_size": position_size,
@@ -455,6 +455,88 @@ def bootstrap_trade_decision(coin, market_data, multi_tf_data):
         "pattern_strength": 0.3,
         "overall_score": score
     }
+    
+    # Extract and store ML features for future training (prevents cold start)
+    try:
+        symbol = f"{coin}USDT"
+        orderbook_data = get_order_book_analysis(symbol)
+        
+        # Create temporary feature extractor
+        temp_extractor = AdvancedFeatureExtractor()
+        
+        # Extract all feature groups
+        microstructure = temp_extractor.extract_microstructure_features(orderbook_data)
+        regime_features = temp_extractor.extract_regime_features(multi_tf_data, current_price)
+        pattern_features = temp_extractor.extract_pattern_features(multi_tf_data, market_data[coin])
+        
+        # Build complete feature vector (same as ML system)
+        features = np.zeros(20)
+        
+        # Microstructure features (0-4)
+        features[0] = microstructure.get("orderbook_imbalance", 0)
+        features[1] = microstructure.get("liquidity_depth", 0.5)
+        features[2] = microstructure.get("spread_pressure", 0)
+        features[3] = microstructure.get("institutional_activity", 0)
+        features[4] = microstructure.get("hidden_liquidity", 0)
+        
+        # Regime features (5-9)
+        features[5] = regime_features.get("cross_tf_momentum", 0)
+        features[6] = regime_features.get("volatility_regime", 1)
+        features[7] = regime_features.get("trend_strength", 0)
+        features[8] = regime_features.get("price_position", 0.5)
+        features[9] = change_24h / 100  # normalize
+        
+        # Pattern features (10-14)
+        features[10] = pattern_features.get("pv_divergence", 0)
+        features[11] = pattern_features.get("money_flow_trend", 0)
+        features[12] = pattern_features.get("fractal_dimension", 1.5) - 1.5  # center around 0
+        features[13] = market_data[coin].get("volume", 0) / 1_000_000  # normalize volume
+        features[14] = min(1.0, market_data[coin].get("quote_volume", 0) / 100_000_000)  # normalize
+        
+        # Technical features (15-19)
+        if "1h" in multi_tf_data and "closes" in multi_tf_data["1h"]:
+            closes = np.array(multi_tf_data["1h"]["closes"])
+            if len(closes) >= 20:
+                sma_20 = np.mean(closes[-20:])
+                features[15] = (current_price - sma_20) / sma_20  # price vs SMA
+                features[16] = np.std(closes[-20:]) / sma_20  # volatility
+                features[17] = (closes[-1] - closes[-5]) / closes[-5] if len(closes) >= 5 else 0  # short momentum
+                features[18] = (np.mean(closes[-5:]) - np.mean(closes[-20:])) / np.mean(closes[-20:])  # momentum
+                features[19] = (np.max(closes[-20:]) - current_price) / (np.max(closes[-20:]) - np.min(closes[-20:]) + 1e-6)  # position in range
+        
+        # Prevent extreme values
+        features = np.clip(features, -5, 5)
+        
+        # Determine market regime for storage
+        momentum = features[5]  # cross_tf_momentum
+        volatility = features[6]  # volatility_regime
+        trend = features[7]  # trend_strength
+        
+        if abs(trend) > 0.02 and volatility < 1.5:
+            regime = 'trending_up' if trend > 0 else 'trending_down'
+        elif volatility > 2.0:
+            regime = 'volatile'
+        else:
+            regime = 'ranging'
+        
+        # Store features in ML features table
+        db_execute("""
+            INSERT INTO ml_features (coin, features_json, regime, timestamp)
+            VALUES (?, ?, ?, ?)
+        """, (coin, json.dumps(features.tolist()), regime, datetime.now().isoformat()))
+        
+        # Add feature hash for tracking
+        result["features_hash"] = hashlib.md5(str(features).encode()).hexdigest()[:8]
+        
+        print(f"Bootstrap: Stored ML features for {coin} (regime: {regime})")
+        
+    except Exception as e:
+        print(f"Bootstrap feature extraction error for {coin}: {e}")
+        # Don't fail the trade - feature extraction is optional during bootstrap
+        result["features_hash"] = "bootstrap_error"
+        pass
+    
+    return result
 
 def print_learning_progress():
     """Show progress during learning phase"""

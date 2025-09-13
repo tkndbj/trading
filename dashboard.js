@@ -268,12 +268,12 @@ function updateActivePositions(positions, marketData) {
 
   if (!positions || Object.keys(positions).length === 0) {
     tbody.innerHTML = `
-            <tr>
-                <td colspan="7" class="text-center py-8 text-gray-500">
-                    <i class="fas fa-chart-line text-2xl mb-2 block opacity-50"></i>
-                    <span class="text-sm">No active positions</span>
-                </td>
-            </tr>`;
+      <tr>
+        <td colspan="8" class="text-center py-8 text-gray-500">
+          <i class="fas fa-robot text-2xl mb-2 block opacity-50"></i>
+          <span class="text-sm">No active ML positions</span>
+        </td>
+      </tr>`;
     return;
   }
 
@@ -281,56 +281,72 @@ function updateActivePositions(positions, marketData) {
 
   Object.entries(positions).forEach(([symbol, position]) => {
     const coin = position.coin;
-    const currentPrice = position.mark_price;
-    const entryPrice = position.entry_price;
+    const currentPrice = parseFloat(position.mark_price || 0);
+    const entryPrice = parseFloat(position.entry_price || 0);
     const direction = position.direction;
-    const leverage = position.leverage || 1;
-    const size = Math.abs(position.size || 0);
-    const pnl = position.pnl || 0;
+    const leverage = parseInt(position.leverage || 1);
+    const size = Math.abs(parseFloat(position.size || 0));
 
-    // Calculate P&L percentage
-    let pnlPercent = 0;
-    if (direction === "LONG") {
-      pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
-    } else {
-      pnlPercent = ((entryPrice - currentPrice) / entryPrice) * 100;
-    }
+    // Use the actual PnL from Binance API (this is the fix)
+    const pnlUsd = parseFloat(position.pnl || 0);
 
-    const pnlColor = pnl >= 0 ? "text-green-400" : "text-red-400";
+    // Calculate P&L percentage based on margin used, not position size
+    const notional = parseFloat(position.notional || 0);
+    const marginUsed = notional / leverage; // This is the actual money at risk
+    const pnlPercent = marginUsed > 0 ? (pnlUsd / marginUsed) * 100 : 0;
+
+    const pnlColor = pnlUsd >= 0 ? "text-green-400" : "text-red-400";
     const directionClass =
       direction === "LONG" ? "long-indicator" : "short-indicator";
 
     rowsHTML += `
-            <tr class="table-row">
-                <td class="py-3 px-2">
-                    <div class="flex items-center space-x-2">
-                        <div class="w-6 h-6 bg-gradient-to-br from-blue-500 to-blue-700 rounded flex items-center justify-center">
-                            <span class="text-xs font-bold text-white">${coin.slice(
-                              0,
-                              2
-                            )}</span>
-                        </div>
-                        <span class="font-medium">${coin}</span>
-                    </div>
-                </td>
-                <td class="py-3 px-2">
-                    <span class="trading-indicator ${directionClass}">${direction}</span>
-                </td>
-                <td class="py-3 px-2 text-right font-mono text-sm">${size.toFixed(
-                  4
-                )}</td>
-                <td class="py-3 px-2 text-right font-mono text-sm">$${entryPrice.toLocaleString()}</td>
-                <td class="py-3 px-2 text-right font-mono text-sm">$${currentPrice.toLocaleString()}</td>
-                <td class="py-3 px-2 text-right ${pnlColor}">
-                    <div class="font-bold">$${pnl >= 0 ? "+" : ""}${pnl.toFixed(
+      <tr class="table-row">
+        <td class="py-3 px-2">
+          <div class="flex items-center space-x-2">
+            <div class="w-6 h-6 bg-gradient-to-br from-blue-500 to-blue-700 rounded flex items-center justify-center">
+              <span class="text-xs font-bold text-white">${coin.slice(
+                0,
+                2
+              )}</span>
+            </div>
+            <span class="font-medium">${coin}</span>
+          </div>
+        </td>
+        <td class="py-3 px-2">
+          <span class="trading-indicator ${directionClass}">${direction}</span>
+        </td>
+        <td class="py-3 px-2 text-right font-mono text-sm">${size.toFixed(
+          4
+        )}</td>
+        <td class="py-3 px-2 text-right font-mono text-sm">$${entryPrice.toLocaleString(
+          undefined,
+          {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 6,
+          }
+        )}</td>
+        <td class="py-3 px-2 text-right font-mono text-sm">$${currentPrice.toLocaleString(
+          undefined,
+          {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 6,
+          }
+        )}</td>
+        <td class="py-3 px-2 text-right ${pnlColor} pnl-cell">
+          <div class="font-bold">$${pnlUsd >= 0 ? "+" : ""}${pnlUsd.toFixed(
       2
     )}</div>
-                    <div class="text-xs">${
-                      pnlPercent >= 0 ? "+" : ""
-                    }${pnlPercent.toFixed(1)}%</div>
-                </td>
-                <td class="py-3 px-2 text-right font-bold">${leverage}x</td>
-            </tr>`;
+          <div class="text-xs">${
+            pnlPercent >= 0 ? "+" : ""
+          }${pnlPercent.toFixed(1)}%</div>
+        </td>
+        <td class="py-3 px-2 text-center">
+          <span class="leverage-badge">${leverage}x</span>
+        </td>
+        <td class="py-3 px-2 text-center">
+          <span class="badge badge-ml">ML</span>
+        </td>
+      </tr>`;
   });
 
   tbody.innerHTML = rowsHTML;
