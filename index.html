@@ -451,6 +451,92 @@
         </div>
       </div>
 
+      <!-- Learning Progress Section -->
+      <div class="card rounded-xl p-4 border-2 border-purple-500/30">
+        <div class="section-header">
+          <h3 class="text-lg font-semibold flex items-center">
+            <i class="fas fa-graduation-cap mr-2 text-purple-400"></i>Learning
+            Progress
+          </h3>
+          <div class="flex space-x-2">
+            <span class="badge" id="learning-phase-badge">BOOTSTRAP</span>
+            <span class="badge" id="ml-status-badge">INACTIVE</span>
+          </div>
+        </div>
+
+        <div class="space-y-4">
+          <!-- Progress Bar -->
+          <div>
+            <div class="flex justify-between items-center mb-2">
+              <span class="text-sm text-gray-400">Learning Trades</span>
+              <span class="text-sm font-bold" id="learning-progress-text"
+                >0/30</span
+              >
+            </div>
+            <div
+              class="progress-bar h-4 bg-gray-700 rounded-lg overflow-hidden"
+            >
+              <div
+                class="progress-fill h-full bg-gradient-to-r from-purple-500 to-cyan-500 transition-all duration-1000"
+                id="learning-progress-bar"
+                style="width: 0%"
+              ></div>
+            </div>
+            <div class="flex justify-between items-center mt-1">
+              <span class="text-xs text-gray-500" id="remaining-trades"
+                >30 remaining</span
+              >
+              <span class="text-xs text-gray-500" id="learning-win-rate"
+                >Win Rate: 0%</span
+              >
+            </div>
+          </div>
+
+          <!-- Status Grid -->
+          <div class="grid grid-cols-2 gap-3">
+            <div class="bg-gray-800/30 rounded-lg p-3 text-center">
+              <i class="fas fa-robot text-purple-400 mb-1 block"></i>
+              <p class="text-xs text-gray-400">ML System</p>
+              <p class="font-bold text-sm" id="ml-system-status">
+                INITIALIZING
+              </p>
+            </div>
+            <div class="bg-gray-800/30 rounded-lg p-3 text-center">
+              <i class="fas fa-brain text-cyan-400 mb-1 block"></i>
+              <p class="text-xs text-gray-400">Mode</p>
+              <p class="font-bold text-sm" id="current-mode">BOOTSTRAP</p>
+            </div>
+          </div>
+
+          <!-- ML Activation Status -->
+          <div
+            class="bg-gradient-to-r from-purple-900/20 to-cyan-900/20 border border-purple-500/30 rounded-lg p-3"
+            id="ml-activation-status"
+          >
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-sm font-semibold text-purple-300">
+                  ML Activation
+                </p>
+                <p class="text-xs text-gray-400" id="ml-activation-message">
+                  Collecting learning data...
+                </p>
+              </div>
+              <div class="flex items-center space-x-2">
+                <div
+                  class="w-2 h-2 rounded-full"
+                  id="ml-activation-indicator"
+                ></div>
+                <span class="text-xs font-bold" id="ml-activation-text"
+                  >PENDING</span
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- END OF LEARNING PROGRESS SECTION -->
+
       <!-- Control Panel -->
       <div class="card rounded-xl p-4">
         <div class="section-header">

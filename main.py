@@ -390,6 +390,91 @@ class AdvancedFeatureExtractor:
         return min(2.0, 1.0 + np.log(complexity) / 10)  # normalize to [1, 2]
 
 # ============== Online Learning System ==============
+LEARNING_MODE = True
+MIN_LEARNING_TRADES = 30
+
+def is_learning_phase():
+    total_trades = db_execute("SELECT COUNT(*) FROM trades WHERE pnl IS NOT NULL", fetch=True)[0][0]
+    return total_trades < MIN_LEARNING_TRADES
+
+def bootstrap_trade_decision(coin, market_data, multi_tf_data):
+    """Simplified decision making for initial data collection"""
+    current_price = market_data[coin]["price"]
+    change_24h = market_data[coin]["change_24h"]
+    
+    # Simple momentum-based logic
+    score = 50.0
+    
+    # Basic technical signals
+    if change_24h > 3:
+        score += 15
+    elif change_24h < -3:
+        score -= 15
+        
+    # Volume confirmation
+    volume_ratio = market_data[coin]["volume"] / market_data[coin].get("avg_volume", market_data[coin]["volume"])
+    if volume_ratio > 1.2:
+        score += 10
+        
+    # Direction determination
+    if score >= 62:
+        direction = "LONG"
+    elif score <= 38:
+        direction = "SHORT"
+    else:
+        return {"direction": "SKIP", "reason": "Bootstrap: neutral signal"}
+        
+    # Conservative parameters for learning
+    leverage = 25  
+    position_size = 0.4 
+    
+    # Simple stop losses
+    sl_pct = 1.5
+    tp_pct = 3.0
+    
+    if direction == "LONG":
+        sl = current_price * (1 - sl_pct/100)
+        tp = current_price * (1 + tp_pct/100)
+    else:
+        sl = current_price * (1 + sl_pct/100)
+        tp = current_price * (1 - tp_pct/100)
+    
+    return {
+        "direction": direction,
+        "leverage": leverage,
+        "position_size": position_size,
+        "confidence": 7,  # Medium confidence
+        "reasoning": f"Bootstrap learning: {direction} based on momentum {change_24h:.1f}%",
+        "stop_loss": float(sl),
+        "take_profit": float(tp),
+        "sl_percentage": sl_pct,
+        "tp_percentage": tp_pct,
+        "market_regime": "learning",
+        "atr": current_price * 0.02,
+        "ml_confidence": 0.6,  # Fake confidence for logging
+        "pattern_strength": 0.3,
+        "overall_score": score
+    }
+
+def print_learning_progress():
+    """Show progress during learning phase"""
+    if not is_learning_phase():
+        return
+        
+    total_trades = db_execute("SELECT COUNT(*) FROM trades WHERE pnl IS NOT NULL", fetch=True)[0][0]
+    wins = db_execute("SELECT COUNT(*) FROM trades WHERE pnl > 0", fetch=True)[0][0]
+    
+    progress = (total_trades / MIN_LEARNING_TRADES) * 100
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+    
+    print(f"\n[LEARNING PROGRESS] {total_trades}/{MIN_LEARNING_TRADES} trades ({progress:.1f}%)")
+    print(f"                   Win Rate: {win_rate:.1f}% | Need {MIN_LEARNING_TRADES - total_trades} more trades")
+    
+    if total_trades >= MIN_LEARNING_TRADES:
+        print("Ready to switch to full ML mode! Set LEARNING_MODE = False")
+        if not ml_system.initialization_attempted:
+            print("🧠 ML System will initialize on next trading cycle...")
+
 class AdaptiveMLModel:
     def __init__(self):
         self.feature_buffer = deque(maxlen=1000)  # Keep recent features
@@ -593,21 +678,20 @@ class InstitutionalPatternDetector:
         if liquidity_score > 80 and abs(imbalance - 1.0) < 0.1:
             patterns["iceberg_detected"] = True
             
-        # ---- Block trade proxy (birim uyumu)
+        # Block trade proxy
         price = float(market_data.get("price", 0.0) or 0.0)
-        volume_24h = float(market_data.get("volume", 0.0) or 0.0)          # <-- eksikti
+        volume_24h = float(market_data.get("volume", 0.0) or 0.0)
         quote_vol = float(market_data.get("quote_volume", 0.0) or 0.0)
         base_vol_est = (quote_vol / max(price, 1e-9)) if price > 0 else 0.0
-        # "yüksek göreli hacim" + "sıkı spread" beraber ise block trades ihtimali
         if base_vol_est > 1.5 * volume_24h and orderbook_data.get("spread", 100) < 0.02:
             patterns["block_trades"] = True
                 
-        # ---- Liquidity hunting proxy
+        # Liquidity hunting proxy
         price_change = abs(float(market_data.get("change_24h", 0.0) or 0.0))
         if price_change > 5 and liquidity_score < 30:
             patterns["liquidity_hunting"] = True
 
-        # ---- Momentum ignition proxy: spread çok düşük + dengesizlik yüksek + anlamlı değişim
+        # Momentum ignition proxy
         if orderbook_data.get("spread", 99) < 0.02 and abs(imbalance - 1.0) > 0.5 and price_change > 2:
             patterns["momentum_ignition"] = True
             
@@ -653,10 +737,241 @@ class InstitutionalPatternDetector:
                 rates[pattern_name] = 0.5  # neutral prior
         return rates
 
-# ============== Enhanced AI Decision System ==============
-def ai_trade_decision_ml(coin, market_data, multi_tf_data, learning_insights):
+# ============== Improved ML Manager ==============
+class MLSystemManager:
+    """Centralized ML system manager with proper initialization and validation"""
+    
+    def __init__(self):
+        self.ml_model = None
+        self.pattern_detector = None
+        self.is_initialized = False
+        self.initialization_attempted = False
+        self.last_retry_attempt = 0  # Track last retry time
+        self.retry_interval = 900  # Retry every 15 minutes (900 seconds)
+        self.max_retries = 5  # Maximum number of retry attempts
+        self.retry_count = 0 
+        
+    def should_retry_initialization(self):
+        """Check if we should attempt ML initialization again"""
+        import time
+        current_time = time.time()
+        
+        # Don't retry if already initialized
+        if self.is_initialized:
+            return False
+            
+        # Don't retry if we've exceeded max attempts
+        if self.retry_count >= self.max_retries:
+            return False
+            
+        # Check if enough time has passed since last attempt
+        time_since_last = current_time - self.last_retry_attempt
+        
+        # Always allow first attempt, or if interval has passed
+        return (not self.initialization_attempted) or (time_since_last >= self.retry_interval)
+    
+    def initialize_ml_system(self):
+        """Initialize ML components with retry logic"""
+        import time
+        
+        # Check if we should attempt initialization
+        if not self.should_retry_initialization():
+            return self.is_initialized
+            
+        # Update retry tracking
+        self.last_retry_attempt = time.time()
+        self.retry_count += 1
+        
+        try:
+            retry_msg = f" (Retry {self.retry_count}/{self.max_retries})" if self.initialization_attempted else ""
+            print(f"🧠 Initializing ML System{retry_msg}...")
+            
+            # Initialize components
+            self.ml_model = AdaptiveMLModel()
+            self.pattern_detector = InstitutionalPatternDetector()
+            
+            # Load historical data for training
+            self._train_from_historical_data()
+            
+            # Validate readiness
+            if self._validate_ml_readiness():
+                self.is_initialized = True
+                success_msg = "✅ ML System initialized successfully"
+                if self.retry_count > 1:
+                    success_msg += f" (after {self.retry_count} attempts)"
+                print(success_msg)
+            else:
+                print(f"⚠️ ML System initialization incomplete - not ready for trading")
+                if self.retry_count < self.max_retries:
+                    next_retry_mins = self.retry_interval // 60
+                    print(f"   Will retry in {next_retry_mins} minutes ({self.retry_count}/{self.max_retries} attempts)")
+                else:
+                    print(f"   Maximum retry attempts reached. Staying in bootstrap mode.")
+                self.is_initialized = False
+                
+        except Exception as e:
+            print(f"❌ ML System initialization failed: {e}")
+            if self.retry_count < self.max_retries:
+                next_retry_mins = self.retry_interval // 60
+                print(f"   Will retry in {next_retry_mins} minutes ({self.retry_count}/{self.max_retries} attempts)")
+            else:
+                print(f"   Maximum retry attempts reached. Staying in bootstrap mode.")
+            self.is_initialized = False
+            
+        self.initialization_attempted = True
+        return self.is_initialized
+    
+    def _train_from_historical_data(self):
+        """Feed bootstrap learning data into ML models"""
+        try:
+            # Get completed trades with features
+            historical_data = db_execute("""
+                SELECT t.coin, t.direction, t.pnl_percent, t.market_conditions,
+                       mf.features_json, mf.regime
+                FROM trades t
+                LEFT JOIN ml_features mf ON t.coin = mf.coin 
+                WHERE t.pnl IS NOT NULL 
+                AND t.pnl_percent IS NOT NULL
+                ORDER BY t.created_at DESC
+                LIMIT 100
+            """, fetch=True)
+            
+            if not historical_data:
+                print("   No historical data found for ML training")
+                return
+                
+            trained_samples = 0
+            
+            for row in historical_data:
+                coin, direction, pnl_percent, market_conditions, features_json, regime = row
+                
+                # Skip if no features available
+                if not features_json or not regime:
+                    continue
+                    
+                try:
+                    features = np.array(json.loads(features_json))
+                    normalized_outcome = np.tanh(float(pnl_percent or 0) / 10.0)
+                    
+                    # Train ML model
+                    self.ml_model.update_model(features, normalized_outcome, regime)
+                    
+                    # Train pattern detector (simplified)
+                    if "Pattern" in (market_conditions or ""):
+                        dummy_patterns = {"historical_pattern": True}
+                        self.pattern_detector.learn_pattern_outcome(dummy_patterns, float(pnl_percent or 0))
+                    
+                    trained_samples += 1
+                    
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    continue
+                    
+            print(f"   Trained on {trained_samples} historical samples")
+            
+        except Exception as e:
+            print(f"   Historical training error: {e}")
+    
+    def _validate_ml_readiness(self):
+        """Validate that ML system is ready for trading"""
+        try:
+            # Check if models exist
+            if not self.ml_model or not self.pattern_detector:
+                return False
+                
+            # Check if we have sufficient historical data
+            total_trades = db_execute("SELECT COUNT(*) FROM trades WHERE pnl IS NOT NULL", fetch=True)[0][0]
+            if total_trades < 5:  # Minimum data requirement
+                return False
+                
+            # Test ML model with dummy data
+            dummy_features = np.random.randn(20)
+            test_regime = self.ml_model.detect_regime(dummy_features)
+            test_signal = self.ml_model.predict_signal(dummy_features, test_regime)
+            
+            # Validate signal structure
+            required_keys = ["direction", "strength", "confidence", "signal_prob", "regime"]
+            if not all(key in test_signal for key in required_keys):
+                return False
+                
+            # Check if model weights are reasonable (not all zeros/NaN)
+            for regime_name, model in self.ml_model.regime_models.items():
+                weights = model['weights']
+                if np.all(weights == 0) or np.any(np.isnan(weights)):
+                    return False
+                    
+            return True
+            
+        except Exception as e:
+            print(f"   ML validation error: {e}")
+            return False
+    
+    def get_trade_decision_ml(self, coin, market_data, multi_tf_data, learning_insights):
+        """Get ML trade decision with proper error handling"""
+        if not self.is_initialized:
+            return {"direction": "SKIP", "reason": "ML system not ready"}
+            
+        try:
+            return ai_trade_decision_ml_implementation(
+                coin, market_data, multi_tf_data, learning_insights,
+                self.ml_model, self.pattern_detector
+            )
+        except Exception as e:
+            print(f"ML decision error: {e}")
+            return {"direction": "SKIP", "reason": f"ML error: {str(e)[:50]}"}
+    
+    def update_on_trade_close(self, coin, direction, pnl_percent, features_hash):
+        """Update ML models when trade closes"""
+        if not self.is_initialized:
+            return
+            
+        try:
+            # Get latest feature set
+            rows = db_execute("""
+                SELECT features_json, regime FROM ml_features 
+                WHERE coin=? 
+                ORDER BY timestamp DESC LIMIT 1
+            """, (coin,), fetch=True)
+            
+            if rows:
+                features_json, regime = rows[0]
+                features = np.array(json.loads(features_json))
+                normalized_outcome = np.tanh(pnl_percent / 10.0)
+                
+                # Update models
+                self.ml_model.update_model(features, normalized_outcome, regime)
+                print(f"📚 Updated ML model: {coin} {direction} -> {pnl_percent:.1f}% (regime: {regime})")
+                
+        except Exception as e:
+            print(f"ML update error: {e}")
+
+# ============== Global ML Manager Instance ==============
+ml_system = MLSystemManager()
+
+# ============== Updated Trade Decision Function ==============
+def get_trade_decision(coin, market_data, multi_tf_data, learning_insights):
+    """Route between bootstrap and ML decisions with retry logic"""
+    
+    if is_learning_phase():
+        print(f"[LEARNING MODE] Using bootstrap logic for {coin}")
+        return bootstrap_trade_decision(coin, market_data, multi_tf_data)
+    else:
+        # Always check if we should retry ML initialization
+        if not ml_system.is_initialized and ml_system.should_retry_initialization():
+            print(f"[RETRY] Attempting ML system initialization...")
+            ml_system.initialize_ml_system()
+        
+        # Use ML system if ready, otherwise fallback to bootstrap
+        if ml_system.is_initialized:
+            print(f"[ML MODE] Using ML system for {coin}")
+            return ml_system.get_trade_decision_ml(coin, market_data, multi_tf_data, learning_insights)
+        else:
+            print(f"[FALLBACK] ML not ready, using bootstrap for {coin}")
+            return bootstrap_trade_decision(coin, market_data, multi_tf_data)
+
+# ============== Separated ML Implementation ==============
+def ai_trade_decision_ml_implementation(coin, market_data, multi_tf_data, learning_insights, ml_model, pattern_detector):
     """
-    ML-enhanced trade decision with institutional-level sophistication
+    ML-enhanced trade decision implementation (separated from the manager)
     """
     try:
         current_price = market_data[coin]["price"]
@@ -664,14 +979,6 @@ def ai_trade_decision_ml(coin, market_data, multi_tf_data, learning_insights):
         
         # Get orderbook for microstructure analysis
         orderbook_data = get_order_book_analysis(symbol)
-        
-        # Initialize ML components
-        if not hasattr(ai_trade_decision_ml, 'ml_model'):
-            ai_trade_decision_ml.ml_model = AdaptiveMLModel()
-            ai_trade_decision_ml.pattern_detector = InstitutionalPatternDetector()
-            
-        ml_model = ai_trade_decision_ml.ml_model
-        pattern_detector = ai_trade_decision_ml.pattern_detector
         
         # Extract ML features
         features = ml_model.extract_features_vector(market_data[coin], multi_tf_data, orderbook_data)
@@ -781,9 +1088,8 @@ def ai_trade_decision_ml(coin, market_data, multi_tf_data, learning_insights):
         }
         
     except Exception as e:
-        print(f"ML AI decision error: {e}")
-        # Fallback to original system
-        return ai_trade_decision_fallback(coin, market_data, multi_tf_data, learning_insights)
+        print(f"ML implementation error: {e}")
+        return {"direction": "SKIP", "reason": f"ML error: {str(e)[:50]}"}
 
 def ai_trade_decision_fallback(coin, market_data, multi_tf_data, learning_insights):
     """Fallback to original deterministic system if ML fails"""
@@ -840,55 +1146,16 @@ def ai_trade_decision_fallback(coin, market_data, multi_tf_data, learning_insigh
         print(f"Fallback system error: {e}")
         return {"direction": "SKIP", "reason": "All systems failed"}
 
-# ============== ML Learning Integration ==============
+# ============== Updated ML Learning Integration ==============
 def update_ml_models_on_trade_close(coin, direction, pnl_percent, features_hash):
-    """Update ML models when a trade closes"""
-    try:
-        # Get the ML model instance
-        if hasattr(ai_trade_decision_ml, 'ml_model') and hasattr(ai_trade_decision_ml, 'pattern_detector'):
-            ml_model = ai_trade_decision_ml.ml_model
-            pattern_detector = ai_trade_decision_ml.pattern_detector
-            
-            # En son feature set'ini al (hash'a bağlı kalma)
-            rows = db_execute("""
-                SELECT features_json, regime FROM ml_features 
-                WHERE coin=? 
-                ORDER BY timestamp DESC LIMIT 1
-            """, (coin,), fetch=True)
-            
-            if rows:
-                features_json, regime = rows[0]
-                features = np.array(json.loads(features_json))
-
-                # Normalize outcome to [-1, 1]
-                normalized_outcome = np.tanh(pnl_percent / 10.0)
-
-                # Update the model
-                ml_model.update_model(features, normalized_outcome, regime)
-                print(f"📚 Updated ML model: {coin} {direction} -> {pnl_percent:.1f}% (regime: {regime})")
-
-        # Pattern öğrenmesi (mevcut mantığı koruyoruz)
-        rows = db_execute("""
-            SELECT reasoning FROM ai_decisions 
-            WHERE coin=? AND direction=? AND outcome_pnl IS NULL
-            ORDER BY timestamp DESC LIMIT 1
-        """, (coin, direction), fetch=True)
-        
-        if rows and "Patterns:" in rows[0][0]:
-            if hasattr(ai_trade_decision_ml, 'pattern_detector'):
-                pattern_detector = ai_trade_decision_ml.pattern_detector
-                dummy_patterns = {"momentum_ignition": True}
-                pattern_detector.learn_pattern_outcome(dummy_patterns, pnl_percent)
-
-    except Exception as e:
-        print(f"ML model update error: {e}")
-
+    """Updated ML model update function"""
+    ml_system.update_on_trade_close(coin, direction, pnl_percent, features_hash)
 
 # ============== Enhanced Position Monitoring ==============
 def calculate_ml_exit_signal(position_data, multi_tf_data):
     """Use ML to determine optimal exit timing"""
     try:
-        if not hasattr(ai_trade_decision_ml, 'ml_model'):
+        if not ml_system.is_initialized:
             return False, "ML not initialized"
             
         coin = position_data["coin"]
@@ -899,7 +1166,7 @@ def calculate_ml_exit_signal(position_data, multi_tf_data):
         market_data = {coin: {"price": price, "change_24h": 0, "volume": 0}}
         orderbook_data = get_order_book_analysis(symbol)
         
-        ml_model = ai_trade_decision_ml.ml_model
+        ml_model = ml_system.ml_model
         
         # Extract current features
         features = ml_model.extract_features_vector(market_data[coin], multi_tf_data, orderbook_data)
@@ -1360,7 +1627,6 @@ def execute_ml_trade(coin, trade_params, current_price, bullish_thr=65.0, bearis
 
         elif trade_params["direction"] == "SHORT":
             ml_boost = ml_confidence * pattern_strength * 10
-            # SHORT'ta long-odaklı skoru ters çevirerek değerlendiriyoruz
             short_score = (100.0 - score) + ml_boost
             if short_score < bearish_thr:
                 print(f"Reject SHORT: short_score {short_score:.1f} < gate {bearish_thr:.1f} (ML boost: +{ml_boost:.1f})")
@@ -1617,6 +1883,7 @@ def dashboard():
 def dashboard_js():
     return send_from_directory(".", "dashboard.js")
 
+# ============== Enhanced Status API ==============
 @app.route("/api/status")
 def api_status():
     try:
@@ -1627,16 +1894,23 @@ def api_status():
         insights = get_learning_insights()
         cost_proj = get_cost_projections()
         
-        # ML-specific metrics
-        ml_metrics = {}
-        if hasattr(ai_trade_decision_ml, 'ml_model'):
-            ml_model = ai_trade_decision_ml.ml_model
-            ml_metrics = {
-                "model_health": ml_model.model_health,
-                "learning_rate": ml_model.learning_rate,
-                "feature_buffer_size": len(ml_model.feature_buffer),
-                "total_regime_models": len(ml_model.regime_models)
-            }
+        # ML-specific metrics with proper validation
+        ml_metrics = {
+            "initialized": ml_system.is_initialized,
+            "initialization_attempted": ml_system.initialization_attempted,
+            "ready_for_trading": ml_system.is_initialized,
+            "learning_phase": is_learning_phase()
+        }
+
+        learning_progress = get_learning_progress_data()
+        
+        if ml_system.is_initialized and ml_system.ml_model:
+            ml_metrics.update({
+                "model_health": ml_system.ml_model.model_health,
+                "learning_rate": ml_system.ml_model.learning_rate,
+                "feature_buffer_size": len(ml_system.ml_model.feature_buffer),
+                "total_regime_models": len(ml_system.ml_model.regime_models)
+            })
         
         return jsonify({
             "total_value": total_value,
@@ -1647,6 +1921,7 @@ def api_status():
             "learning_metrics": insights,
             "cost_tracking": cost_proj,
             "ml_metrics": ml_metrics,
+            "learning_progress": learning_progress,
             "timestamp": datetime.now().isoformat()
         })
     except Exception as e:
@@ -1654,6 +1929,28 @@ def api_status():
 
 def run_flask_app():
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+
+def get_learning_progress_data():
+    """Get detailed learning progress for dashboard"""
+    total_trades = db_execute("SELECT COUNT(*) FROM trades WHERE pnl IS NOT NULL", fetch=True)[0][0]
+    wins = db_execute("SELECT COUNT(*) FROM trades WHERE pnl > 0", fetch=True)[0][0]
+    
+    progress_percent = min(100, (total_trades / MIN_LEARNING_TRADES) * 100)
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+    
+    return {
+        "is_learning_phase": is_learning_phase(),
+        "total_learning_trades": total_trades,
+        "min_required_trades": MIN_LEARNING_TRADES,
+        "remaining_trades": max(0, MIN_LEARNING_TRADES - total_trades),
+        "progress_percent": progress_percent,
+        "learning_win_rate": win_rate,
+        "ml_initialized": ml_system.is_initialized,
+        "ml_ready": ml_system.is_initialized and not is_learning_phase(),
+        "bootstrap_complete": total_trades >= MIN_LEARNING_TRADES,
+        "retry_count": ml_system.retry_count if hasattr(ml_system, 'retry_count') else 0,
+        "max_retries": ml_system.max_retries if hasattr(ml_system, 'max_retries') else 5
+    }
 
 # ============== Main ML-Enhanced Trading Loop ==============
 def run_ml_enhanced_bot():
@@ -1704,6 +2001,9 @@ def run_ml_enhanced_bot():
                     print(f"   Unrealized P&L: ${total_pnl:+.2f}")
                     print(f"   Total Exposure: ${sum(p['notional'] for p in current_positions.values()):.0f}")
 
+                # Display learning progress
+                print_learning_progress()
+
                 print("\n🧠 ML Market Analysis:")
                 for coin in target_coins[:6]:
                     if coin in md:
@@ -1716,11 +2016,10 @@ def run_ml_enhanced_bot():
                         orderbook = get_order_book_analysis(symbol)
                         
                         try:
-                            if hasattr(ai_trade_decision_ml, 'ml_model'):
-                                ml_model = ai_trade_decision_ml.ml_model
-                                features = ml_model.extract_features_vector(md[coin], tf, orderbook)
-                                regime = ml_model.detect_regime(features)
-                                ml_signal = ml_model.predict_signal(features, regime)
+                            if ml_system.is_initialized and ml_system.ml_model:
+                                features = ml_system.ml_model.extract_features_vector(md[coin], tf, orderbook)
+                                regime = ml_system.ml_model.detect_regime(features)
+                                ml_signal = ml_system.ml_model.predict_signal(features, regime)
                                 
                                 confidence_emoji = "🔥" if ml_signal["confidence"] > 0.8 else "⚡" if ml_signal["confidence"] > 0.6 else "📊"
                                 regime_emoji = "🚀" if regime == "trending_up" else "📉" if regime == "trending_down" else "📈" if regime == "volatile" else "↔️"
@@ -1738,91 +2037,60 @@ def run_ml_enhanced_bot():
                 prisk = calculate_portfolio_risk()
                 if prisk["can_trade"]:
                     insights = get_learning_insights()
-                    print(f"\n⚡ Aggressive Opportunity Scan:")
-                    print(f"   Portfolio: {prisk['positions_count']}/{MAX_CONCURRENT_POSITIONS} | Available: ${prisk['available_balance']:.2f}")
-                    print(f"   Margin Usage: {prisk['margin_ratio']*100:.1f}% | ML Win Rate: {insights['win_rate']:.1f}%")
-
-                    # Get dynamic policy
-                    policy = get_policy_adjustments()
-                    b_thr = policy["global"]["bullish_thr"]
-                    s_thr = policy["global"]["bearish_thr"]
-                    explore = (random.random() < policy["global"]["exploration_rate"])
-
-                    # Collect ML candidates
-                    ml_candidates = []
+                    
+                    # Collect candidates using appropriate decision system
+                    candidates = []
                     for coin in target_coins:
                         if coin not in md:
                             continue
                         symbol = f"{coin}USDT"
                         if symbol in current_positions:
                             continue
-                            
+                        
                         tf = get_multi_timeframe_data(symbol)
-                        tp = ai_trade_decision_ml(coin, md, tf, insights)
+                        tp = get_trade_decision(coin, md, tf, insights)
                         
                         if tp and tp["direction"] != "SKIP":
-                            ml_confidence = tp.get("ml_confidence", 0.5)
-                            pattern_strength = tp.get("pattern_strength", 0.0)
-                            
-                            # Aggressive filtering - only high-confidence ML signals
-                            if ml_confidence > 0.55 or pattern_strength > 0.20:
-                                ml_candidates.append((coin, tp, ml_confidence, pattern_strength))
-
-                    # Sort by combined ML score
-                    ml_candidates.sort(key=lambda x: x[2] * (1 + x[3]), reverse=True)
-
-                    max_new = min(3, MAX_CONCURRENT_POSITIONS - prisk["positions_count"])
+                            candidates.append((coin, tp))
+                    
+                    # Sort by confidence/score
+                    candidates.sort(key=lambda x: x[1].get("overall_score", 50), reverse=True)
+                    
+                    # Execute trades
+                    max_new = min(2 if is_learning_phase() else 3, 
+                                  MAX_CONCURRENT_POSITIONS - prisk["positions_count"])
                     executed = 0
-
-                    for i, (coin, tp, ml_conf, pattern_str) in enumerate(ml_candidates[:max_new]):
-                        print(f"\n   🎯 ML Candidate #{i+1}: {coin}")
-                        print(f"      Direction: {tp['direction']} | ML Confidence: {ml_conf:.2f} | Pattern: {pattern_str:.2f}")
-                        print(f"      Leverage: {tp.get('leverage', 15)}x | R/R: 1:{tp.get('tp_percentage', 0)/max(tp.get('sl_percentage', 1), 0.1):.1f}")
-
-                        if tp["confidence"] >= MIN_CONFIDENCE_THRESHOLD:
-                            # Get per-coin adjustments
-                            adj = policy["per_coin"].get(coin, {"bias": 0.0, "size_mult": 1.0, "lev_mult": 1.0})
-
-                            # Aggressive regime multipliers
-                            reg = tp.get("market_regime", "unknown")
-                            reg_size = {"trending_up":1.3, "trending_down":1.3, "ranging":0.9, "volatile":1.1}.get(reg,1.0)
-                            reg_lev  = {"trending_up":1.2, "trending_down":1.2, "ranging":0.9, "volatile":1.0}.get(reg,1.0)
-
-                            # ML-enhanced multipliers
-                            ml_size_boost = 1.0 + (ml_conf - 0.6) * 0.8  # Up to 80% larger
-                            ml_lev_boost = 1.0 + (pattern_str * 0.5)  # Up to 50% more leverage
-                            
-                            size_mult = adj["size_mult"] * reg_size * ml_size_boost
-                            lev_mult = adj["lev_mult"] * reg_lev * ml_lev_boost
-
-                            # More aggressive thresholds for high-confidence ML
-                            use_b_thr = b_thr - (5.0 if ml_conf > 0.8 else 3.0 if explore and i == 0 else 0.0)
-                            use_s_thr = s_thr + (5.0 if ml_conf > 0.8 else 3.0 if explore and i == 0 else 0.0)
-
-                            ok = execute_ml_trade(
-                                coin, tp, md[coin]["price"],
-                                bullish_thr=use_b_thr,
-                                bearish_thr=use_s_thr, 
-                                size_mult=size_mult,
-                                lev_mult=lev_mult,
-                                score_bias=adj["bias"]
-                            )
-                            
-                            if ok:
-                                executed += 1
-                                time.sleep(2)  # Brief pause between trades
-                            else:
-                                print("      ⚠️ Trade rejected by risk management")
+                    
+                    for coin, tp in candidates[:max_new]:
+                        # During learning phase, use more permissive thresholds
+                        if is_learning_phase():
+                            b_threshold = 60.0  # Lower than normal 65
+                            s_threshold = 40.0  # Higher than normal 35
                         else:
-                            print("      ⏭️ Below confidence threshold")
-
+                            policy = get_policy_adjustments()
+                            b_threshold = policy["global"]["bullish_thr"]
+                            s_threshold = policy["global"]["bearish_thr"]
+                        
+                        ok = execute_ml_trade(
+                            coin, tp, md[coin]["price"],
+                            bullish_thr=b_threshold,
+                            bearish_thr=s_threshold,
+                            size_mult=1.0,
+                            lev_mult=1.0,
+                            score_bias=0.0
+                        )
+                        
+                        if ok:
+                            executed += 1
+                            time.sleep(2)
+                    
                     if executed == 0:
-                        print("   No ML opportunities met aggressive criteria")
+                        print("   No opportunities met criteria")
                     else:
-                        print(f"   🔥 Executed {executed} aggressive ML trade(s)")
+                        print(f"   Executed {executed} trade(s)")
                         
                 else:
-                    print(f"\n⚠️ Trading halted: {prisk['reason']}")
+                    print(f"\nTrading halted: {prisk['reason']}")
 
                 # Enhanced summary
                 total_value = calculate_portfolio_value(md)
@@ -1836,11 +2104,10 @@ def run_ml_enhanced_bot():
                 print(f"   Daily P&L: ${final_risk.get('realized_today', 0):+.2f}")
                 
                 # ML-specific metrics
-                if hasattr(ai_trade_decision_ml, 'ml_model'):
-                    ml_model = ai_trade_decision_ml.ml_model
-                    print(f"   ML Model Health: {ml_model.model_health}")
-                    print(f"   Learning Rate: {ml_model.learning_rate:.6f}")
-                    print(f"   Feature Buffer: {len(ml_model.feature_buffer)}/1000")
+                if ml_system.is_initialized and ml_system.ml_model:
+                    print(f"   ML Model Health: {ml_system.ml_model.model_health}")
+                    print(f"   Learning Rate: {ml_system.ml_model.learning_rate:.6f}")
+                    print(f"   Feature Buffer: {len(ml_system.ml_model.feature_buffer)}/1000")
                 
                 print(f"   Session Costs: ${cost_data['current']['total']:.4f}")
                 print("="*90)

@@ -174,6 +174,7 @@ function updateDashboard(data) {
     updateMarketData(data.market_data);
     updatePerformanceChart(data);
     updateLearningMetrics(data.learning_metrics);
+    updateLearningProgress(data.learning_progress);
     updateCostTracking(data.cost_tracking);
   } catch (error) {
     console.error("❌ Dashboard update error:", error);
@@ -581,6 +582,101 @@ function updateElement(id, value) {
   const element = document.getElementById(id);
   if (element) {
     element.textContent = value;
+  }
+}
+
+function updateLearningProgress(learningData) {
+  if (!learningData) return;
+
+  const {
+    is_learning_phase,
+    total_learning_trades,
+    min_required_trades,
+    remaining_trades,
+    progress_percent,
+    learning_win_rate,
+    ml_initialized,
+    ml_ready,
+    bootstrap_complete,
+    retry_count,
+    max_retries,
+  } = learningData;
+
+  // Update progress bar
+  updateElement(
+    "learning-progress-text",
+    `${total_learning_trades}/${min_required_trades}`
+  );
+  updateElement("remaining-trades", `${remaining_trades} remaining`);
+  updateElement(
+    "learning-win-rate",
+    `Win Rate: ${learning_win_rate.toFixed(1)}%`
+  );
+
+  const progressBar = document.getElementById("learning-progress-bar");
+  if (progressBar) {
+    progressBar.style.width = `${progress_percent}%`;
+  }
+
+  // Update badges
+  const learningBadge = document.getElementById("learning-phase-badge");
+  const mlStatusBadge = document.getElementById("ml-status-badge");
+
+  if (is_learning_phase) {
+    learningBadge.textContent = "LEARNING";
+    learningBadge.className = "badge badge-warning";
+    mlStatusBadge.textContent = "BOOTSTRAP";
+    mlStatusBadge.className = "badge badge-info";
+  } else {
+    learningBadge.textContent = "COMPLETE";
+    learningBadge.className = "badge badge-success";
+    if (ml_ready) {
+      mlStatusBadge.textContent = "ACTIVE";
+      mlStatusBadge.className = "badge badge-success";
+    } else {
+      mlStatusBadge.textContent = "INITIALIZING";
+      mlStatusBadge.className = "badge badge-warning";
+    }
+  }
+
+  // Update status indicators
+  updateElement(
+    "current-mode",
+    is_learning_phase ? "BOOTSTRAP" : "ML-ENHANCED"
+  );
+
+  if (ml_initialized) {
+    updateElement("ml-system-status", "READY");
+  } else if (bootstrap_complete) {
+    updateElement("ml-system-status", `INIT ${retry_count}/${max_retries}`);
+  } else {
+    updateElement("ml-system-status", "WAITING");
+  }
+
+  // Update ML activation status
+  const activationIndicator = document.getElementById(
+    "ml-activation-indicator"
+  );
+  const activationText = document.getElementById("ml-activation-text");
+  const activationMessage = document.getElementById("ml-activation-message");
+
+  if (ml_ready) {
+    activationIndicator.className =
+      "w-2 h-2 rounded-full bg-green-400 animate-pulse";
+    activationText.textContent = "ACTIVE";
+    activationText.className = "text-xs font-bold text-green-400";
+    activationMessage.textContent = "ML system active and trading";
+  } else if (bootstrap_complete && !ml_initialized) {
+    activationIndicator.className =
+      "w-2 h-2 rounded-full bg-yellow-400 animate-pulse";
+    activationText.textContent = "INITIALIZING";
+    activationText.className = "text-xs font-bold text-yellow-400";
+    activationMessage.textContent = `Initializing ML models (${retry_count}/${max_retries})...`;
+  } else {
+    activationIndicator.className = "w-2 h-2 rounded-full bg-blue-400";
+    activationText.textContent = "LEARNING";
+    activationText.className = "text-xs font-bold text-blue-400";
+    activationMessage.textContent = `${remaining_trades} more trades needed for ML activation`;
   }
 }
 
