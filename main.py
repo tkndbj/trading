@@ -538,6 +538,162 @@ def bootstrap_trade_decision(coin, market_data, multi_tf_data):
     
     return result
 
+def reconcile_closed_positions():
+    """
+    Detect positions closed by Binance SL/TP and record them for ML learning
+    This ensures no training data is lost
+    """
+    try:
+        # Get positions we think should be open
+        tracked_positions = db_execute("""
+            SELECT position_id, coin, symbol, direction, entry_price, entry_time, 
+                   position_size, leverage, notional_value, stop_loss, take_profit,
+                   confidence, reasoning
+            FROM active_positions
+        """, fetch=True)
+        
+        # Get actually open positions from Binance
+        current_binance_positions = get_open_positions()
+        
+        positions_closed = []
+        
+        for tracked in tracked_positions:
+            symbol = tracked[2]  # symbol column
+            
+            if symbol not in current_binance_positions:
+                # Position was closed by Binance - need to record the closure
+                positions_closed.append(tracked)
+                
+                # Remove from active_positions table
+                db_execute("DELETE FROM active_positions WHERE position_id = ?", 
+                          (tracked[0],))  # position_id
+        
+        # For each closed position, try to get the final P&L
+        for pos_data in positions_closed:
+            try:
+                final_pnl = get_position_final_pnl(pos_data)
+                record_closed_position_for_learning(pos_data, final_pnl)
+                print(f"📚 Recorded SL/TP closure: {pos_data[1]} -> ${final_pnl:.2f}")
+            except Exception as e:
+                print(f"❌ Failed to record closure for {pos_data[1]}: {e}")
+                
+    except Exception as e:
+        print(f"❌ Position reconciliation error: {e}")
+
+def get_position_final_pnl(position_data):
+    """
+    Calculate final P&L for a position closed by Binance
+    Uses current market price since we can't get exact fill price
+    """
+    coin = position_data[1]
+    direction = position_data[3]
+    entry_price = float(position_data[4])
+    position_size = float(position_data[6])
+    leverage = int(position_data[7])
+    
+    # Get current market price (approximation of close price)
+    market_data = get_batch_market_data()
+    if coin not in market_data:
+        return 0.0
+        
+    current_price = market_data[coin]["price"]
+    
+    # Calculate P&L
+    if direction == "LONG":
+        price_change_pct = (current_price - entry_price) / entry_price
+    else:  # SHORT
+        price_change_pct = (entry_price - current_price) / entry_price
+    
+    # Calculate actual USD P&L based on margin used
+    margin_used = (position_size * entry_price) / leverage
+    pnl_usd = margin_used * price_change_pct
+    
+    return pnl_usd
+
+def record_closed_position_for_learning(position_data, final_pnl):
+    """
+    Record a position closure for ML learning data - CORRECTED VERSION
+    """
+    # Fix: Handle the correct number of columns (13, not 14)
+    if len(position_data) >= 13:
+        position_id, coin, symbol, direction, entry_price, entry_time, \
+        position_size, leverage, notional_value, stop_loss, take_profit, \
+        confidence, reasoning = position_data[:13]
+        market_conditions = position_data[13] if len(position_data) > 13 else ""
+    else:
+        print(f"❌ Invalid position data length: {len(position_data)}")
+        return
+    
+    # Calculate P&L percentage
+    margin_used = notional_value / leverage
+    pnl_percent = (final_pnl / margin_used * 100) if margin_used > 0 else 0
+    
+    # Determine closure reason
+    market_data = get_batch_market_data()
+    current_price = market_data.get(coin, {}).get("price", entry_price)
+    
+    if direction == "LONG":
+        if current_price <= stop_loss * 1.001:  # Allow 0.1% tolerance
+            reason = "Stop Loss Hit"
+        elif current_price >= take_profit * 0.999:
+            reason = "Take Profit Hit"
+        else:
+            reason = "Unknown Closure"
+    else:  # SHORT
+        if current_price >= stop_loss * 0.999:
+            reason = "Stop Loss Hit"
+        elif current_price <= take_profit * 1.001:
+            reason = "Take Profit Hit"
+        else:
+            reason = "Unknown Closure"
+    
+    # Record the trade closure
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    close_position_id = f"{symbol}_CLOSE_{timestamp.replace(' ','_').replace(':','-')}"
+    
+    db_execute("""
+        INSERT INTO trades (
+            timestamp, position_id, coin, action, direction, price,
+            position_size, leverage, notional_value, stop_loss, take_profit,
+            pnl, pnl_percent, duration, reason, confidence, profitable,
+            market_conditions, created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        timestamp, close_position_id, coin, f"{direction} CLOSE", direction,
+        current_price, position_size, leverage, notional_value, stop_loss, take_profit,
+        final_pnl, pnl_percent, calculate_duration(entry_time, timestamp), reason,
+        confidence, 1 if final_pnl > 0 else 0, market_conditions, timestamp
+    ))
+    
+    # Update ML learning systems
+    update_ai_decision_outcome(coin, direction, pnl_percent)
+    update_coin_stats(coin, pnl_percent)
+    
+    # Update ML models if available
+    if not is_learning_phase() and ml_system.is_initialized:
+        ml_system.update_on_trade_close(coin, direction, pnl_percent, "sltp_closure")
+
+def calculate_duration(entry_time, exit_time):
+    """Calculate trade duration"""
+    try:
+        entry_dt = datetime.strptime(entry_time, "%Y-%m-%d %H:%M:%S")
+        exit_dt = datetime.strptime(exit_time, "%Y-%m-%d %H:%M:%S")
+        duration = exit_dt - entry_dt
+        
+        total_minutes = int(duration.total_seconds() / 60)
+        if total_minutes < 60:
+            return f"{total_minutes}m"
+        elif total_minutes < 1440:  # Less than 24 hours
+            hours = total_minutes // 60
+            minutes = total_minutes % 60
+            return f"{hours}h{minutes}m"
+        else:
+            days = total_minutes // 1440
+            remaining_hours = (total_minutes % 1440) // 60
+            return f"{days}d{remaining_hours}h"
+    except:
+        return "unknown"
+
 def print_learning_progress():
     """Show progress during learning phase"""
     if not is_learning_phase():
@@ -1302,24 +1458,51 @@ def get_futures_balance():
 
 def get_open_positions():
     try:
+        # Use positionRisk endpoint for accurate PnL data
         positions = binance_request("/fapi/v2/positionRisk", "GET", signed=True) or []
         out = {}
+        
         for p in positions:
             amt = float(p.get("positionAmt", 0))
-            if abs(amt) <= 0: continue
+            if abs(amt) <= 0: 
+                continue  # Skip positions with no size
+                
             sym = p["symbol"]
             coin = sym.replace("USDT","").replace("USDC","").replace("BNFCR","")
-            entry = float(p.get("entryPrice") or p.get("avgPrice") or 0)
-            mark  = float(p.get("markPrice") or p.get("lastPrice") or 0)
-            pnl   = float(p.get("unRealizedPnl") or p.get("unrealizedPnl") or 0)
-            lev   = int(float(p.get("leverage", "1")))
+            
+            # Get prices - ensure we have valid data
+            entry = float(p.get("entryPrice") or 0)
+            mark = float(p.get("markPrice") or 0)
+            
+            # Calculate PnL correctly - this is the key fix
+            # Binance returns unRealizedPnl in the correct field
+            unrealized_pnl = float(p.get("unRealizedPnl", 0))
+            
+            # If unRealizedPnl is 0 but we have positions, calculate manually
+            if unrealized_pnl == 0 and entry > 0 and mark > 0 and abs(amt) > 0:
+                if amt > 0:  # LONG position
+                    unrealized_pnl = amt * (mark - entry)
+                else:  # SHORT position 
+                    unrealized_pnl = amt * (mark - entry)  # amt is negative for shorts
+            
+            leverage = int(float(p.get("leverage", "1")))
+            notional = abs(amt * mark)
+            
             out[sym] = {
-                "coin": coin, "symbol": sym, "size": amt,
-                "direction": "LONG" if amt>0 else "SHORT",
-                "entry_price": entry, "mark_price": mark, "pnl": pnl,
-                "leverage": lev, "notional": abs(amt*mark)
+                "coin": coin, 
+                "symbol": sym, 
+                "size": amt,
+                "direction": "LONG" if amt > 0 else "SHORT",
+                "entry_price": entry, 
+                "mark_price": mark, 
+                "pnl": unrealized_pnl,  # This should now show correct live P&L
+                "leverage": leverage, 
+                "notional": notional,
+                "percentage": float(p.get("percentage", "0"))  # Add percentage if available
             }
+            
         return out
+        
     except Exception as e:
         print(f"Positions error: {e}")
         return {}
@@ -1327,7 +1510,7 @@ def get_open_positions():
 def get_batch_market_data():
     try:
         data = binance_request("/fapi/v1/ticker/24hr", "GET", signed=False) or []
-        target = {'BTC','ETH','SOL','BNB','SEI','DOGE','TIA','TAO','ARB','SUI','ENA','FET'}
+        target = {'BTC','ETH','SOL','BNB','SEI','DOGE','TIA','TAO','ARB','SUI','ENA','FET','APT','ZK','OP','LDO','WLD','XRP','LINK'}
         md = {}
         for t in data:
             sym = t["symbol"]
@@ -1816,6 +1999,25 @@ def execute_ml_trade(coin, trade_params, current_price, bullish_thr=65.0, bearis
                 close_futures_position(symbol)
                 return False
 
+        if res:  # Order was successful
+            # Store in active_positions table for tracking - CORRECTED
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            pid = f"{symbol}_{ts.replace(' ','_').replace(':','-')}"
+        
+            db_execute("""
+                INSERT OR REPLACE INTO active_positions (
+                    position_id, coin, symbol, direction, entry_price, entry_time,
+                    position_size, leverage, notional_value, stop_loss, take_profit,
+                    duration_target, confidence, reasoning, market_regime, atr_at_entry
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                pid, coin, symbol, trade_params["direction"], current_price, ts,
+                position_value, final_leverage, float(computed_notional), 
+                sl_price, tp_price, "SL/TP", trade_params["confidence"],
+                trade_params.get("reasoning", ""), trade_params.get("market_regime", ""),
+                trade_params.get("atr", 0)
+            ))
+
         # Enhanced trade logging
         save_ai_decision(coin, trade_params)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1841,6 +2043,7 @@ def execute_ml_trade(coin, trade_params, current_price, bullish_thr=65.0, bearis
 def monitor_ml_positions():
     """Enhanced position monitoring with ML exit signals"""
     try:
+        reconcile_closed_positions()
         positions = get_open_positions()
         
         for symbol, pos in positions.items():
@@ -1994,11 +2197,14 @@ def api_status():
                 "total_regime_models": len(ml_system.ml_model.regime_models)
             })
         
+        # GET TRADE HISTORY FROM DATABASE INSTEAD
+        trade_history = get_recent_trade_history()
+        
         return jsonify({
             "total_value": total_value,
             "balance": portfolio["balance"], 
             "positions": portfolio["positions"],
-            "trade_history": portfolio["trade_history"][-20:],
+            "trade_history": trade_history,  # Now from database
             "market_data": md,
             "learning_metrics": insights,
             "cost_tracking": cost_proj,
@@ -2011,6 +2217,41 @@ def api_status():
 
 def run_flask_app():
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+
+def get_recent_trade_history():
+    """Get recent trade history from database for dashboard"""
+    try:
+        recent_trades = db_execute("""
+            SELECT timestamp, coin, action, direction, price, pnl, pnl_percent, 
+                   confidence, reason, market_conditions, leverage, ml_confidence, pattern_strength
+            FROM trades 
+            ORDER BY timestamp DESC 
+            LIMIT 20
+        """, fetch=True)
+        
+        trade_history = []
+        for trade in recent_trades:
+            trade_history.append({
+                "timestamp": trade[0] or "",
+                "coin": trade[1] or "",
+                "action": trade[2] or "",
+                "direction": trade[3] or "",
+                "price": float(trade[4]) if trade[4] else 0,
+                "pnl": float(trade[5]) if trade[5] is not None else None,
+                "pnl_percent": float(trade[6]) if trade[6] is not None else None,
+                "confidence": int(trade[7]) if trade[7] else 5,
+                "reason": trade[8] or "",
+                "market_conditions": trade[9] or "",
+                "leverage": int(trade[10]) if trade[10] else 1,
+                "ml_confidence": float(trade[11]) if trade[11] else 0.5,
+                "pattern_strength": float(trade[12]) if trade[12] else 0.0
+            })
+        
+        return trade_history
+        
+    except Exception as e:
+        print(f"Error fetching trade history: {e}")
+        return []
 
 def get_learning_progress_data():
     """Get detailed learning progress for dashboard"""
@@ -2053,14 +2294,14 @@ def run_ml_enhanced_bot():
     print(f"✅ Connected | Balance: ${balance:.2f}")
     print(f"🎯 Target: Institutional-grade performance with 15-50x leverage")
 
-    target_coins = ['BTC','ETH','SOL','BNB','SEI','DOGE','TIA','TAO','ARB','SUI','ENA','FET']
+    target_coins = ['BTC','ETH','SOL','BNB','SEI','DOGE','TIA','TAO','ARB','SUI','ENA','FET','APT','ZK','OP','LDO','WLD','XRP','LINK']
     last_full = 0
     iteration = 0
 
     while True:
         try:
             iteration += 1
-            now = time.time()
+            now = time.time()            
             
             # Enhanced position monitoring
             current_positions = monitor_ml_positions()
