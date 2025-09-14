@@ -146,6 +146,47 @@ def db_execute(sql, params=(), many=False, fetch=False):
                 continue
             raise
 
+def fix_database_schema():
+    """Add missing columns to existing tables"""
+    try:
+        conn = db_connect()
+        cursor = conn.cursor()
+        
+        # Check and add missing columns to trades table
+        cursor.execute("PRAGMA table_info(trades)")
+        existing_columns = [col[1] for col in cursor.fetchall()]
+        
+        if 'ml_confidence' not in existing_columns:
+            cursor.execute("ALTER TABLE trades ADD COLUMN ml_confidence REAL DEFAULT 0.5")
+            print("Added ml_confidence column to trades table")
+            
+        if 'pattern_strength' not in existing_columns:
+            cursor.execute("ALTER TABLE trades ADD COLUMN pattern_strength REAL DEFAULT 0.0")
+            print("Added pattern_strength column to trades table")
+        
+        # Check and add missing columns to active_positions table
+        cursor.execute("PRAGMA table_info(active_positions)")
+        existing_columns = [col[1] for col in cursor.fetchall()]
+        
+        if 'symbol' not in existing_columns:
+            cursor.execute("ALTER TABLE active_positions ADD COLUMN symbol TEXT DEFAULT ''")
+            print("Added symbol column to active_positions table")
+            
+        # Update existing records where symbol might be empty
+        cursor.execute("""
+            UPDATE active_positions 
+            SET symbol = coin || 'USDT' 
+            WHERE symbol = '' OR symbol IS NULL
+        """)
+        
+        conn.commit()
+        conn.close()
+        print("Database schema fixes applied successfully")
+        
+    except Exception as e:
+        print(f"Schema fix error: {e}")
+
+# Update the init_database function to include the new columns
 def init_database():
     conn = db_connect()
     c = conn.cursor()
@@ -173,12 +214,14 @@ def init_database():
         profitable BOOLEAN,
         market_conditions TEXT,
         timeframe_analysis TEXT,
+        ml_confidence REAL DEFAULT 0.5,
+        pattern_strength REAL DEFAULT 0.0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS active_positions (
         position_id TEXT PRIMARY KEY,
         coin TEXT NOT NULL,
-        symbol TEXT NOT NULL,
+        symbol TEXT NOT NULL DEFAULT '',
         direction TEXT NOT NULL,
         entry_price REAL NOT NULL,
         entry_time TEXT NOT NULL,
@@ -255,7 +298,11 @@ def init_database():
     """)
     conn.commit()
     conn.close()
-    print("📁 SQLite initialized (WAL) with ML extensions")
+    
+    # Apply schema fixes for existing databases
+    fix_database_schema()
+    
+    print("📁 SQLite initialized (WAL) with ML extensions and schema fixes")
 
 # ============== ML Feature Engineering ==============
 class AdvancedFeatureExtractor:
@@ -558,7 +605,12 @@ def reconcile_closed_positions():
         positions_closed = []
         
         for tracked in tracked_positions:
-            symbol = tracked[2]  # symbol column
+            # Handle potential missing symbol column by reconstructing it
+            if len(tracked) >= 3 and tracked[2]:  # symbol exists and not empty
+                symbol = tracked[2]
+            else:  # reconstruct symbol from coin
+                coin = tracked[1]
+                symbol = f"{coin}USDT"
             
             if symbol not in current_binance_positions:
                 # Position was closed by Binance - need to record the closure
@@ -2221,17 +2273,28 @@ def run_flask_app():
 def get_recent_trade_history():
     """Get recent trade history from database for dashboard"""
     try:
-        recent_trades = db_execute("""
-            SELECT timestamp, coin, action, direction, price, pnl, pnl_percent, 
-                   confidence, reason, market_conditions, leverage, ml_confidence, pattern_strength
-            FROM trades 
-            ORDER BY timestamp DESC 
-            LIMIT 20
-        """, fetch=True)
+        # First check what columns exist
+        column_check = db_execute("PRAGMA table_info(trades)", fetch=True)
+        existing_columns = [col[1] for col in column_check]
+        
+        # Build query based on available columns
+        base_columns = ["timestamp", "coin", "action", "direction", "price", "pnl", "pnl_percent", 
+                       "confidence", "reason", "market_conditions", "leverage"]
+        
+        ml_columns = []
+        if "ml_confidence" in existing_columns:
+            ml_columns.append("ml_confidence")
+        if "pattern_strength" in existing_columns:
+            ml_columns.append("pattern_strength")
+            
+        all_columns = base_columns + ml_columns
+        query = f"SELECT {', '.join(all_columns)} FROM trades ORDER BY timestamp DESC LIMIT 20"
+        
+        recent_trades = db_execute(query, fetch=True)
         
         trade_history = []
         for trade in recent_trades:
-            trade_history.append({
+            trade_dict = {
                 "timestamp": trade[0] or "",
                 "coin": trade[1] or "",
                 "action": trade[2] or "",
@@ -2243,9 +2306,22 @@ def get_recent_trade_history():
                 "reason": trade[8] or "",
                 "market_conditions": trade[9] or "",
                 "leverage": int(trade[10]) if trade[10] else 1,
-                "ml_confidence": float(trade[11]) if trade[11] else 0.5,
-                "pattern_strength": float(trade[12]) if trade[12] else 0.0
-            })
+            }
+            
+            # Add ML columns if they exist
+            col_index = 11
+            if "ml_confidence" in existing_columns:
+                trade_dict["ml_confidence"] = float(trade[col_index]) if len(trade) > col_index and trade[col_index] else 0.5
+                col_index += 1
+            else:
+                trade_dict["ml_confidence"] = 0.5
+                
+            if "pattern_strength" in existing_columns:
+                trade_dict["pattern_strength"] = float(trade[col_index]) if len(trade) > col_index and trade[col_index] else 0.0
+            else:
+                trade_dict["pattern_strength"] = 0.0
+            
+            trade_history.append(trade_dict)
         
         return trade_history
         
