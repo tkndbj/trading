@@ -747,7 +747,7 @@ def set_stop_loss_take_profit(symbol, stop_price, take_profit_price, position_si
         return None
 
 def execute_trade(coin, trade_params, current_price, balance):
-    """Execute trade with fixed 15% position size and 15x leverage"""
+    """Execute trade with live logging"""
     if trade_params["direction"] in ["SKIP", "GRID"]:
         return False
         
@@ -760,29 +760,24 @@ def execute_trade(coin, trade_params, current_price, balance):
         qty = q_qty(symbol, notional / current_price)
         
         if qty <= 0:
-            print(f"Qty rounded to zero for {coin}")
+            add_bot_log("ERROR", "TRADE", f"{coin}: Quantity rounded to zero")
             return False
 
         # Minimum notional check
         min_notional = _symbol_info.get(symbol, {}).get("minNotional", Decimal("5"))
         computed_notional = Decimal(str(current_price)) * Decimal(str(qty))
         if computed_notional < min_notional:
-            print(f"Below MIN_NOTIONAL: {float(computed_notional):.4f} < {float(min_notional):.4f}")
+            add_bot_log("ERROR", "TRADE", f"{coin}: Below MIN_NOTIONAL: {float(computed_notional):.2f} < {float(min_notional):.2f}")
             return False
 
-        print(f"EXECUTING: {trade_params['direction']} {coin}")
-        print(f"  Size: ${position_value:.0f} ({POSITION_SIZE*100}% of portfolio)")
-        print(f"  Leverage: {LEVERAGE}x")
-        print(f"  Notional: ${float(computed_notional):.0f}")
-        print(f"  Strategy: {trade_params.get('strategy', 'unknown')}")
-        print(f"  Reason: {trade_params['reason']}")
+        add_bot_log("INFO", "EXECUTE", f"{coin} {trade_params['direction']} - Size: ${position_value:.0f} ({POSITION_SIZE*100}%) - Strategy: {trade_params.get('strategy', 'unknown')}")
 
         # Execute the trade
         side = "BUY" if trade_params["direction"] == "LONG" else "SELL"
         res = place_futures_order(symbol, side, qty, LEVERAGE)
         
         if not res:
-            print(f"Order failed for {symbol}")
+            add_bot_log("ERROR", "ORDER", f"{coin}: Order execution failed")
             return False
 
         # Set stop loss and take profit
@@ -794,9 +789,11 @@ def execute_trade(coin, trade_params, current_price, balance):
                 trade_params["direction"]
             )
             if not sltp:
-                print("SL/TP failed, closing position")
+                add_bot_log("ERROR", "SLTP", f"{coin}: SL/TP failed, closing position")
                 close_futures_position(symbol)
                 return False
+            else:
+                add_bot_log("INFO", "SLTP", f"{coin}: SL: ${trade_params['stop_loss']:.4f} | TP: ${trade_params['take_profit']:.4f}")
 
         # Store trade record
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -824,11 +821,11 @@ def execute_trade(coin, trade_params, current_price, balance):
               trade_params.get("stop_loss", 0), trade_params.get("take_profit", 0),
               trade_params["reason"], trade_params.get("regime", "unknown")))
 
-        print(f"SUCCESS: {coin} {trade_params['direction']} executed")
+        add_bot_log("SUCCESS", "TRADE", f"{coin} {trade_params['direction']} executed - Entry: ${current_price:.4f}")
         return True
 
     except Exception as e:
-        print(f"Trade execution error: {e}")
+        add_bot_log("ERROR", "TRADE", f"{coin}: Execution error - {e}")
         return False
 
 def handle_grid_trading(coin, symbol, current_price, balance):
@@ -877,14 +874,21 @@ def handle_grid_trading(coin, symbol, current_price, balance):
 
 # ============== Position Monitoring ==============
 def monitor_positions():
-    """Monitor positions for regime changes and profit taking"""
+    """Monitor positions for regime changes and profit taking - with live logging"""
     try:
         positions = get_open_positions()
+        
+        if positions:
+            add_bot_log("INFO", "MONITOR", f"Monitoring {len(positions)} active position(s)")
         
         for symbol, pos in positions.items():
             # Get fresh market data
             multi_tf_data = get_multi_timeframe_data(symbol)
             current_regime = detect_market_regime(multi_tf_data, pos["mark_price"])
+            
+            # Log position status
+            pnl_pct = (pos["pnl"] / (pos["notional"]/pos["leverage"])) * 100 if pos["notional"] > 0 else 0
+            add_bot_log("DEBUG", "POSITION", f"{pos['coin']}: {pos['direction']} | P&L: {pnl_pct:+.1f}% | Regime: {current_regime}")
             
             # Check for regime change exit
             should_close = False
@@ -900,32 +904,28 @@ def monitor_positions():
                 
                 # Exit conditions based on strategy
                 if strategy == "breakout":
-                    # Exit breakout trades if regime changes to ranging/volatile
                     if current_regime in ["ranging", "volatile"]:
                         should_close = True
                         close_reason = f"Regime changed to {current_regime}"
                         
                 elif strategy == "hybrid":
-                    # Check if momentum has reversed
                     momentum_signal, _ = calculate_momentum_signal(multi_tf_data)
                     position_direction = 1 if pos["direction"] == "LONG" else -1
                     
-                    if momentum_signal * position_direction < -0.3:  # Momentum reversed
+                    if momentum_signal * position_direction < -0.3:
                         should_close = True
                         close_reason = "Momentum reversal detected"
                 
                 # Profit taking for all strategies
-                pnl_pct = (pos["pnl"] / (pos["notional"]/pos["leverage"])) * 100 if pos["notional"] > 0 else 0
-                
-                if pnl_pct > 8:  # Take profit at 8%
+                if pnl_pct > 8:
                     should_close = True
                     close_reason = f"Profit taking at {pnl_pct:.1f}%"
-                elif pnl_pct < -4:  # Stop loss at -4% (backup to exchange SL)
+                elif pnl_pct < -4:
                     should_close = True
                     close_reason = f"Emergency stop at {pnl_pct:.1f}%"
             
             if should_close:
-                print(f"Closing {pos['coin']}: {close_reason}")
+                add_bot_log("WARNING", "EXIT", f"Closing {pos['coin']}: {close_reason}")
                 res = close_futures_position(symbol)
                 
                 if res:
@@ -946,12 +946,12 @@ def monitor_positions():
                     # Remove from active positions
                     db_execute("DELETE FROM active_positions WHERE symbol = ?", (symbol,))
                     
-                    print(f"Closed {pos['coin']}: P&L ${pnl_usd:+.2f} ({pnl_percent:+.1f}%)")
+                    add_bot_log("SUCCESS", "CLOSE", f"Closed {pos['coin']}: P&L ${pnl_usd:+.2f} ({pnl_percent:+.1f}%)")
                     
         return positions
         
     except Exception as e:
-        print(f"Monitor error: {e}")
+        add_bot_log("ERROR", "MONITOR", f"Monitor error: {e}")
         return {}
 
 def calculate_portfolio_stats(market_data):
@@ -990,10 +990,12 @@ def api_status():
         positions = get_open_positions()
         stats = calculate_portfolio_stats(md)
         
-        # Get recent trades
+        # Get recent trades - fixed ordering
         recent_trades = db_execute("""
             SELECT timestamp, coin, action, direction, price, pnl, pnl_percent, reason
-            FROM trades ORDER BY timestamp DESC LIMIT 20
+            FROM trades 
+            ORDER BY created_at DESC, timestamp DESC 
+            LIMIT 20
         """, fetch=True)
         
         trade_history = []
@@ -1009,40 +1011,59 @@ def api_status():
                 "reason": trade[7]
             })
         
+        # Get live bot logs from the last hour
+        logs = get_recent_bot_logs()
+        
         return jsonify({
             "portfolio_stats": stats,
             "positions": positions,
             "market_data": md,
             "trade_history": trade_history,
+            "bot_logs": logs,
             "timestamp": datetime.now().isoformat()
         })
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Add this new logging system
+bot_logs = deque(maxlen=100)  # Keep last 100 log entries
+
+def add_bot_log(level, component, message):
+    """Add a log entry that will be shown in the dashboard"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_entry = {
+        "timestamp": timestamp,
+        "level": level,
+        "component": component,
+        "message": message
+    }
+    bot_logs.append(log_entry)
+    print(f"[{timestamp}] [{level}] [{component}] {message}")
+
+def get_recent_bot_logs():
+    """Get recent bot logs for the dashboard"""
+    return list(bot_logs)
+
 def run_flask_app():
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
 
 # ============== Main Trading Loop ==============
 def run_technical_bot():
-    """Main trading loop with technical analysis"""
+    """Main trading loop with technical analysis - Updated with live logging"""
     init_database()
     sync_server_time()
     load_exchange_info()
 
-    print("Technical Analysis Trading Bot - Production Mode")
-    print("Configuration:")
-    print(f"  - Position Size: {POSITION_SIZE*100}% of portfolio")
-    print(f"  - Leverage: {LEVERAGE}x")
-    print(f"  - Max Positions: {MAX_CONCURRENT_POSITIONS}")
-    print(f"  - Check Interval: {CHECK_INTERVAL}s")
+    add_bot_log("INFO", "STARTUP", "Technical Analysis Trading Bot starting...")
+    add_bot_log("INFO", "CONFIG", f"Position Size: {POSITION_SIZE*100}% | Leverage: {LEVERAGE}x | Max Positions: {MAX_CONCURRENT_POSITIONS}")
     
     balance = get_futures_balance()
     if balance <= 0:
-        print("No futures balance or API error")
+        add_bot_log("ERROR", "BALANCE", "No futures balance or API error")
         return
         
-    print(f"Connected | Balance: ${balance:.2f}")
+    add_bot_log("INFO", "BALANCE", f"Connected | Balance: ${balance:.2f}")
 
     iteration = 0
     last_scan = 0
@@ -1057,19 +1078,17 @@ def run_technical_bot():
             
             # Full market scan every 3 minutes
             if now - last_scan >= 180:
-                print(f"\n=== Market Scan #{iteration} ===")
+                add_bot_log("INFO", "SCAN", f"Market Scan #{iteration} starting...")
                 
                 balance = get_futures_balance()
                 md = get_batch_market_data()
                 stats = calculate_portfolio_stats(md)
                 
-                print(f"Portfolio: ${stats['total_value']:.2f} | ")
-                print(f"Positions: {stats['positions_count']}/{MAX_CONCURRENT_POSITIONS} | ")
-                print(f"Daily P&L: ${stats['daily_pnl']:+.2f}")
+                add_bot_log("INFO", "PORTFOLIO", f"Value: ${stats['total_value']:.2f} | Positions: {stats['positions_count']}/{MAX_CONCURRENT_POSITIONS} | Daily P&L: ${stats['daily_pnl']:+.2f}")
                 
                 # Identify high volume candidates
                 high_volume_coins = identify_high_volume_coins(md)
-                print(f"High volume coins: {len(high_volume_coins)} candidates")
+                add_bot_log("INFO", "ANALYSIS", f"Found {len(high_volume_coins)} high volume candidates")
                 
                 # Check if we can open new positions
                 if stats['positions_count'] < MAX_CONCURRENT_POSITIONS:
@@ -1085,38 +1104,43 @@ def run_technical_bot():
                             continue
                             
                         # Get technical analysis
+                        add_bot_log("INFO", "ANALYSIS", f"Analyzing {coin} - Price: ${coin_data['price']:.4f} | Volume: {coin_data['quote_volume']/1000000:.1f}M")
+                        
                         multi_tf_data = get_multi_timeframe_data(symbol)
                         trade_decision = get_trade_decision(coin, md, multi_tf_data)
                         
                         if trade_decision["direction"] == "GRID":
-                            # Handle grid trading
+                            add_bot_log("INFO", "STRATEGY", f"{coin}: {trade_decision['reason']}")
                             if handle_grid_trading(coin, symbol, coin_data["price"], balance):
                                 executed += 1
-                                print(f"Grid setup: {coin}")
+                                add_bot_log("SUCCESS", "GRID", f"Grid setup complete for {coin}")
                                 
                         elif trade_decision["direction"] in ["LONG", "SHORT"]:
-                            # Handle directional trades
+                            add_bot_log("INFO", "SIGNAL", f"{coin} {trade_decision['direction']}: {trade_decision['reason']}")
                             if execute_trade(coin, trade_decision, coin_data["price"], balance):
                                 executed += 1
-                                time.sleep(2)  # Rate limiting
+                                add_bot_log("SUCCESS", "TRADE", f"{coin} {trade_decision['direction']} executed successfully")
+                                time.sleep(2)
+                        elif trade_decision["direction"] == "SKIP":
+                            add_bot_log("DEBUG", "SKIP", f"{coin}: {trade_decision['reason']}")
                     
                     if executed == 0:
-                        print("No trading opportunities found")
+                        add_bot_log("INFO", "SCAN", "No trading opportunities found in this scan")
                     else:
-                        print(f"Executed {executed} new position(s)")
+                        add_bot_log("SUCCESS", "SCAN", f"Executed {executed} new position(s)")
                         
                 else:
-                    print("Maximum positions reached")
+                    add_bot_log("WARNING", "LIMIT", "Maximum positions reached - monitoring only")
                 
                 last_scan = now
                 
             time.sleep(CHECK_INTERVAL)
 
         except KeyboardInterrupt:
-            print("\nBot stopped by user")
+            add_bot_log("INFO", "SHUTDOWN", "Bot stopped by user")
             break
         except Exception as e:
-            print(f"Main loop error: {e}")
+            add_bot_log("ERROR", "SYSTEM", f"Main loop error: {e}")
             time.sleep(CHECK_INTERVAL)
 
 # ============== Main Execution ==============

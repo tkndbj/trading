@@ -310,12 +310,14 @@
         border-bottom: 1px solid rgba(42, 42, 42, 0.5);
         display: flex;
         gap: 8px;
-        align-items: center;
+        align-items: flex-start;
+        word-wrap: break-word;
       }
 
       .log-timestamp {
         color: var(--text-secondary);
         font-size: 10px;
+        flex-shrink: 0;
       }
 
       .log-level {
@@ -323,6 +325,19 @@
         border-radius: 3px;
         font-size: 9px;
         font-weight: 600;
+        flex-shrink: 0;
+      }
+
+      .log-component {
+        color: var(--accent-blue);
+        font-size: 10px;
+        flex-shrink: 0;
+      }
+
+      .log-message {
+        color: var(--text-primary);
+        font-size: 11px;
+        flex: 1;
       }
 
       .log-INFO {
@@ -336,6 +351,14 @@
       .log-ERROR {
         background: rgba(255, 51, 102, 0.2);
         color: var(--accent-red);
+      }
+      .log-SUCCESS {
+        background: rgba(0, 255, 136, 0.3);
+        color: var(--accent-green);
+      }
+      .log-DEBUG {
+        background: rgba(160, 160, 160, 0.2);
+        color: var(--text-secondary);
       }
 
       /* Buttons */
@@ -623,10 +646,14 @@
         </div>
 
         <div class="panel-header">
-          <span>📝 ACTIVITY LOG</span>
+          <span>📝 LIVE ACTIVITY LOG</span>
         </div>
         <div class="log-container" id="log-container">
-          <!-- Logs will be inserted here -->
+          <div class="empty-state">
+            <p style="color: var(--text-secondary); font-size: 11px">
+              Loading live bot activity...
+            </p>
+          </div>
         </div>
       </div>
 
@@ -694,9 +721,8 @@
     </div>
 
     <script>
-      // Technical Trading Bot Dashboard
+      // Technical Trading Bot Dashboard - Live Data Only
       let updateInterval = null;
-      let logEntries = [];
 
       // Dashboard State
       const dashboardState = {
@@ -707,10 +733,7 @@
 
       // Initialize Dashboard
       document.addEventListener("DOMContentLoaded", function () {
-        console.log("🔧 Initializing Technical Trading Dashboard...");
-        addLog("INFO", "SYSTEM", "Technical Trading Bot started");
-        addLog("INFO", "API", "Connected to Binance Futures");
-        addLog("INFO", "SCAN", "Scanning high volume coins...");
+        console.log("🔧 Initializing Live Trading Dashboard...");
         startDataFetching();
       });
 
@@ -740,7 +763,6 @@
           dashboardState.lastData = data;
         } catch (error) {
           console.error("❌ Data fetch error:", error);
-          addLog("ERROR", "SYSTEM", `Connection failed: ${error.message}`);
           dashboardState.errorCount++;
           updateConnectionStatus(false, error.message);
         }
@@ -754,10 +776,9 @@
           updateActivePositions(data.positions);
           updateTradeHistory(data.trade_history);
           updateMarketData(data.market_data);
-          addLog("INFO", "DATA", "Dashboard updated");
+          updateLiveLogs(data.bot_logs);
         } catch (error) {
           console.error("❌ Dashboard update error:", error);
-          addLog("ERROR", "SYSTEM", `Update failed: ${error.message}`);
         }
       }
 
@@ -920,9 +941,12 @@
           return;
         }
 
-        tbody.innerHTML = tradeHistory
-          .slice(-10)
-          .reverse()
+        // Sort trades by timestamp (most recent first) and take top 10
+        const sortedTrades = tradeHistory
+          .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+          .slice(0, 10);
+
+        tbody.innerHTML = sortedTrades
           .map((trade) => {
             let tradeTime;
             try {
@@ -939,6 +963,7 @@
             const action = trade.action || "UNKNOWN";
             const isLong = action.includes("LONG");
             const isShort = action.includes("SHORT");
+            const isClose = action.includes("CLOSE");
             const actionColor = isLong
               ? "positive"
               : isShort
@@ -948,15 +973,29 @@
             let pnlDisplay = "--";
             let pnlColor = "neutral";
 
-            if (trade.pnl !== undefined && trade.pnl !== null) {
+            // Only show P&L for closing trades
+            if (isClose && trade.pnl !== undefined && trade.pnl !== null) {
               const pnl = parseFloat(trade.pnl);
               if (!isNaN(pnl)) {
                 pnlDisplay = `$${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`;
                 pnlColor = pnl >= 0 ? "positive" : "negative";
+
+                // Add percentage if available
+                if (
+                  trade.pnl_percent !== undefined &&
+                  trade.pnl_percent !== null
+                ) {
+                  const pnlPct = parseFloat(trade.pnl_percent);
+                  if (!isNaN(pnlPct)) {
+                    pnlDisplay += `<br><small>${
+                      pnlPct >= 0 ? "+" : ""
+                    }${pnlPct.toFixed(1)}%</small>`;
+                  }
+                }
               }
             }
 
-            const reason = (trade.reason || "--").substring(0, 20);
+            const reason = (trade.reason || "--").substring(0, 25);
 
             return `
             <tr class="fade-in">
@@ -964,12 +1003,12 @@
               <td style="font-weight: bold;">${trade.coin || "UNKNOWN"}</td>
               <td class="${actionColor}">${action}</td>
               <td style="text-align: right;">
-                ${trade.price ? `$${parseFloat(trade.price).toFixed(2)}` : "--"}
+                ${trade.price ? `$${parseFloat(trade.price).toFixed(4)}` : "--"}
               </td>
               <td class="${pnlColor}" style="text-align: right;">${pnlDisplay}</td>
               <td style="font-size: 10px;" title="${
                 trade.reason || ""
-              }">${reason}${reason.length === 20 ? "..." : ""}</td>
+              }">${reason}${reason.length === 25 ? "..." : ""}</td>
             </tr>`;
           })
           .join("");
@@ -1022,26 +1061,37 @@
           .join("");
       }
 
-      function addLog(level, component, message) {
-        const timestamp = new Date().toLocaleTimeString();
-        const logEntry = document.createElement("div");
-        logEntry.className = "log-entry fade-in";
-        logEntry.innerHTML = `
-                <span class="log-timestamp">[${timestamp}]</span>
-                <span class="log-level log-${level}">${level}</span>
-                <span style="color: var(--accent-blue);">[${component}]</span>
-                <span>${message}</span>
-            `;
-
+      function updateLiveLogs(botLogs) {
         const container = document.getElementById("log-container");
-        container.insertBefore(logEntry, container.firstChild);
+        if (!container) return;
 
-        // Keep only last 50 entries
-        while (container.children.length > 50) {
-          container.removeChild(container.lastChild);
+        if (!botLogs || botLogs.length === 0) {
+          container.innerHTML = `
+            <div class="empty-state">
+              <p style="color: var(--text-secondary); font-size: 11px;">
+                Waiting for bot activity...
+              </p>
+            </div>`;
+          return;
         }
 
-        document.getElementById("last-update").textContent = timestamp;
+        // Clear container and add fresh logs (most recent first)
+        container.innerHTML = "";
+
+        // Take last 30 logs and reverse to show newest first
+        const recentLogs = botLogs.slice(-30).reverse();
+
+        recentLogs.forEach((log) => {
+          const logEntry = document.createElement("div");
+          logEntry.className = "log-entry fade-in";
+          logEntry.innerHTML = `
+            <span class="log-timestamp">[${log.timestamp}]</span>
+            <span class="log-level log-${log.level}">${log.level}</span>
+            <span class="log-component">[${log.component}]</span>
+            <span class="log-message">${log.message}</span>
+          `;
+          container.appendChild(logEntry);
+        });
       }
 
       function updateConnectionStatus(isConnected, errorMessage = "") {
@@ -1075,22 +1125,9 @@
       }
 
       function refreshData() {
-        addLog("INFO", "USER", "Manual refresh triggered");
+        console.log("Manual refresh triggered");
         fetchData();
       }
-
-      // Simulate some activity logs for demo
-      setTimeout(() => {
-        addLog("INFO", "SCAN", "Analyzing BTC breakout pattern");
-      }, 2000);
-
-      setTimeout(() => {
-        addLog("WARNING", "VOLUME", "ETH volume spike detected: 125M USDT");
-      }, 4000);
-
-      setTimeout(() => {
-        addLog("INFO", "REGIME", "Market regime: TRENDING_UP detected");
-      }, 6000);
 
       // Error handling and cleanup
       window.addEventListener("beforeunload", () => {
