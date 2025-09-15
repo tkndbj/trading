@@ -437,11 +437,11 @@ class AdvancedFeatureExtractor:
         return min(2.0, 1.0 + np.log(complexity) / 10)  # normalize to [1, 2]
 
 # ============== Online Learning System ==============
-LEARNING_MODE = True
+LEARNING_MODE = False
 MIN_LEARNING_TRADES = 30
 
 def is_learning_phase():
-    total_trades = db_execute("SELECT COUNT(*) FROM trades WHERE pnl IS NOT NULL", fetch=True)[0][0]
+    total_trades = db_execute("SELECT COUNT(*) FROM trades", fetch=True)[0][0]
     return total_trades < MIN_LEARNING_TRADES
 
 def bootstrap_trade_decision(coin, market_data, multi_tf_data):
