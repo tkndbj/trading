@@ -2331,7 +2331,7 @@ def get_recent_trade_history():
 
 def get_learning_progress_data():
     """Get detailed learning progress for dashboard"""
-    total_trades = db_execute("SELECT COUNT(*) FROM trades WHERE pnl IS NOT NULL", fetch=True)[0][0]
+    total_trades = db_execute("SELECT COUNT(*) FROM trades", fetch=True)[0][0]
     wins = db_execute("SELECT COUNT(*) FROM trades WHERE pnl > 0", fetch=True)[0][0]
     
     progress_percent = min(100, (total_trades / MIN_LEARNING_TRADES) * 100)
