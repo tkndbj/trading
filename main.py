@@ -337,7 +337,7 @@ def get_order_book_analysis(symbol):
         total_notional = bid_notional + ask_notional
         imbalance = (bid_notional / ask_notional) if ask_notional > 0 else 1.0
 
-        liq_score = min(100.0, (total_notional / 1_000_000.0) * 100.0)
+        liq_score = min(100.0, (total_notional / 500_000.0) * 100.0)
 
         return {
             "liquidity_score": liq_score,
