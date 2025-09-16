@@ -66,19 +66,24 @@ def binance_request(endpoint, method="GET", params=None, signed=False, recvWindo
 
 # ============== Exchange Info Cache ==============
 _symbol_info = {}
+_all_usdt_symbols = set()
 
 def load_exchange_info():
     data = binance_request("/fapi/v1/exchangeInfo", "GET", signed=False)
     for s in data["symbols"]:
         sym = s["symbol"]
-        pf = next(f for f in s["filters"] if f["filterType"] == "PRICE_FILTER")
-        lf = next(f for f in s["filters"] if f["filterType"] in ("MARKET_LOT_SIZE", "LOT_SIZE"))
-        mn_filter = next((f for f in s["filters"] if f["filterType"] == "MIN_NOTIONAL"), None)
-        _symbol_info[sym] = {
-            "tickSize": Decimal(pf["tickSize"]),
-            "stepSize": Decimal(lf["stepSize"]),
-            "minNotional": Decimal(mn_filter["notional"]) if mn_filter else None
-        }
+        if s["status"] == "TRADING" and s["contractType"] == "PERPETUAL":
+            if sym.endswith("USDT"):
+                _all_usdt_symbols.add(sym)
+            
+            pf = next(f for f in s["filters"] if f["filterType"] == "PRICE_FILTER")
+            lf = next(f for f in s["filters"] if f["filterType"] in ("MARKET_LOT_SIZE", "LOT_SIZE"))
+            mn_filter = next((f for f in s["filters"] if f["filterType"] == "MIN_NOTIONAL"), None)
+            _symbol_info[sym] = {
+                "tickSize": Decimal(pf["tickSize"]),
+                "stepSize": Decimal(lf["stepSize"]),
+                "minNotional": Decimal(mn_filter["notional"]) if mn_filter else None
+            }
 
 def q_price(sym, price_float):
     info = _symbol_info[sym]
@@ -97,6 +102,12 @@ POSITION_SIZE = 0.15  # Fixed 15% of portfolio
 LEVERAGE = 15  # Fixed 15x leverage
 MAX_CONCURRENT_POSITIONS = 8
 CHECK_INTERVAL = 30  # 30 seconds
+
+# Favorite coins - can be manually curated for "right room" strategy
+FAVORITE_COINS = {'BOME','PENDLE','JUP','LINEA','UB','ZEC','CGPT','POPCAT','WIF','OL','JASMY','BLUR','GMX','COMP','ARB','OP','AVAX','MATIC','DOT','ADA','LINK','UNI','AAVE','CRV','SNX','1INCH','SUSHI','YFI','BAL','MKR'}
+
+# ENHANCEMENT: Multi-timeframe data cache
+_tf_cache = {}
 
 # ============== Database ==============
 DB_PATH = "trading_bot.db"
@@ -241,29 +252,44 @@ def get_open_positions():
         return {}
 
 def get_batch_market_data():
+    """Fetch market data for all USDT perpetuals, filter mid-caps dynamically"""
     try:
         data = binance_request("/fapi/v1/ticker/24hr", "GET", signed=False) or []
-        target = {'BOME','PENDLE','JUP','LINEA','UB','ZEC','CGPT','POPCAT','WIF','OL','JASMY','BLUR','GMX','COMP'}
         md = {}
+        
         for t in data:
             sym = t["symbol"]
-            if not sym.endswith("USDT"): continue
+            if not sym.endswith("USDT") or sym not in _all_usdt_symbols: 
+                continue
+                
             coin = sym[:-4]
-            if coin in target:
+            quote_vol = float(t["quoteVolume"])
+            
+            # Dynamic filtering: mid-cap coins (10M-100M USDT) + favorites
+            if quote_vol >= 10_000_000 and (quote_vol <= 100_000_000 or coin in FAVORITE_COINS):
                 md[coin] = {
                     "price": float(t["lastPrice"]),
                     "change_24h": float(t["priceChangePercent"]),
                     "volume": float(t["volume"]),
                     "high_24h": float(t["highPrice"]),
                     "low_24h": float(t["lowPrice"]),
-                    "quote_volume": float(t["quoteVolume"])
+                    "quote_volume": quote_vol
                 }
+        
         return md
+        
     except Exception as e:
         print(f"24hr fetch error: {e}")
         return {}
 
 def get_multi_timeframe_data(symbol):
+    """ENHANCED: Cached multi-timeframe data to reduce API load"""
+    now = time.time()
+    
+    # Check cache first
+    if symbol in _tf_cache and now - _tf_cache[symbol]["time"] < 60:
+        return _tf_cache[symbol]["data"]
+    
     intervals = {'5m':('5m',100),'15m':('15m',100),'1h':('1h',100),'4h':('4h',100)}
     out = {}
     for k,(itv,limit) in intervals.items():
@@ -279,6 +305,9 @@ def get_multi_timeframe_data(symbol):
             }
         except:
             pass
+    
+    # Cache the result
+    _tf_cache[symbol] = {"data": out, "time": now}
     return out
 
 def get_order_book_analysis(symbol):
@@ -323,34 +352,87 @@ def get_order_book_analysis(symbol):
 
 # ============== Technical Analysis Functions ==============
 def calculate_ema(prices, period):
-    """Calculate Exponential Moving Average"""
+    """ENHANCED: Calculate Exponential Moving Average with Decimal precision"""
     if len(prices) < period:
         return None
-    alpha = 2.0 / (period + 1.0)
-    ema = prices[0]
-    for price in prices[1:]:
-        ema = alpha * price + (1 - alpha) * ema
-    return ema
+    
+    # Convert to Decimal for precision
+    decimal_prices = [Decimal(str(p)) for p in prices]
+    alpha = Decimal('2.0') / (period + 1)
+    ema = decimal_prices[0]
+    
+    for price in decimal_prices[1:]:
+        ema = alpha * price + (Decimal('1') - alpha) * ema
+    
+    return float(ema)
 
 def calculate_sma(prices, period):
-    """Calculate Simple Moving Average"""
+    """ENHANCED: Calculate Simple Moving Average with Decimal precision"""
     if len(prices) < period:
         return None
-    return sum(prices[-period:]) / period
+    
+    # Convert to Decimal for precision
+    decimal_prices = [Decimal(str(p)) for p in prices[-period:]]
+    return float(sum(decimal_prices) / period)
 
-def calculate_atr(highs, lows, closes, period=14):
-    """Calculate Average True Range"""
+def calculate_rsi(prices, period=14):
+    """ENHANCED: Calculate RSI with Decimal precision"""
+    if len(prices) < period + 1:
+        return None
+    
+    # Convert to Decimal for precision
+    decimal_prices = [Decimal(str(p)) for p in prices]
+    gains = []
+    losses = []
+    
+    for i in range(1, len(decimal_prices)):
+        change = decimal_prices[i] - decimal_prices[i-1]
+        if change > 0:
+            gains.append(change)
+            losses.append(Decimal('0'))
+        else:
+            gains.append(Decimal('0'))
+            losses.append(-change)
+    
+    if len(gains) < period:
+        return None
+        
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    
+    if avg_loss == 0:
+        return 100
+    
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return float(rsi)
+
+def calculate_atr(highs, lows, closes, period=14, current_price=None):
+    """ENHANCED: Calculate ATR with price-relative capping to prevent absurd values"""
     if len(highs) < period+1 or len(lows) < period+1 or len(closes) < period+1:
-        return 0
+        # If no current_price provided, use a conservative default
+        fallback = (current_price * 0.02) if current_price else 0.02
+        return max(fallback, 0.001)
+    
     tr = []
     for i in range(1, len(highs)):
         hl = highs[i] - lows[i]
         hc = abs(highs[i] - closes[i-1])
         lc = abs(lows[i] - closes[i-1])
         tr.append(max(hl, hc, lc))
+    
     if len(tr) < period:
-        return 0
-    return sum(tr[-period:]) / period
+        fallback = (current_price * 0.02) if current_price else 0.02
+        return max(fallback, 0.001)
+    
+    atr_value = sum(tr[-period:]) / period
+    
+    # ENHANCEMENT: Cap ATR at 10% of current price to prevent absurd SL/TP
+    if current_price:
+        max_atr = current_price * 0.1  # Cap at 10% of price
+        atr_value = min(atr_value, max_atr)
+    
+    return max(atr_value, 0.001)  # Ensure minimum ATR
 
 def detect_market_regime(multi_tf_data, current_price):
     """Detect market regime: trending_up, trending_down, ranging, volatile"""
@@ -373,7 +455,7 @@ def detect_market_regime(multi_tf_data, current_price):
         trend_strength = (ema_20 - ema_50) / ema_50
         
         # Volatility measure
-        atr = calculate_atr(highs, lows, closes, 14)
+        atr = calculate_atr(highs, lows, closes, 14, current_price)
         volatility_ratio = atr / current_price if current_price > 0 else 0
         
         # Regime classification
@@ -390,8 +472,52 @@ def detect_market_regime(multi_tf_data, current_price):
         print(f"Regime detection error: {e}")
         return "ranging"
 
+def detect_rsi_divergence(multi_tf_data, current_price):
+    """Detect RSI divergence for momentum confirmation"""
+    try:
+        if "1h" not in multi_tf_data or len(multi_tf_data["1h"]["closes"]) < 50:
+            return False, "No data"
+            
+        closes = multi_tf_data["1h"]["closes"]
+        highs = multi_tf_data["1h"]["highs"]
+        lows = multi_tf_data["1h"]["lows"]
+        
+        # Calculate RSI for recent periods
+        rsi_values = []
+        for i in range(30, len(closes)):  # Calculate RSI for last 20 periods
+            rsi = calculate_rsi(closes[:i+1], 14)
+            if rsi is not None:
+                rsi_values.append(rsi)
+        
+        if len(rsi_values) < 10:
+            return False, "Insufficient RSI data"
+        
+        # Look for divergence in last 10 periods
+        recent_highs = highs[-10:]
+        recent_lows = lows[-10:]
+        recent_rsi = rsi_values[-10:]
+        
+        # Bullish divergence: price makes lower lows, RSI makes higher lows
+        price_ll = min(recent_lows) == recent_lows[-1] and recent_lows[-1] < recent_lows[0]
+        rsi_hl = min(recent_rsi) != recent_rsi[-1] and recent_rsi[-1] > min(recent_rsi)
+        
+        # Bearish divergence: price makes higher highs, RSI makes lower highs  
+        price_hh = max(recent_highs) == recent_highs[-1] and recent_highs[-1] > recent_highs[0]
+        rsi_lh = max(recent_rsi) != recent_rsi[-1] and recent_rsi[-1] < max(recent_rsi)
+        
+        if price_ll and rsi_hl:
+            return True, "Bullish RSI divergence"
+        elif price_hh and rsi_lh:
+            return True, "Bearish RSI divergence"
+        else:
+            return False, "No divergence"
+            
+    except Exception as e:
+        print(f"RSI divergence error: {e}")
+        return False, "Error"
+
 def detect_breakout(multi_tf_data, current_price, volume_data):
-    """Detect breakouts above resistance with volume confirmation"""
+    """Detect breakouts above resistance with volume confirmation and RSI divergence"""
     try:
         if "1h" not in multi_tf_data or len(multi_tf_data["1h"]["closes"]) < 50:
             return False, "No data"
@@ -418,30 +544,39 @@ def detect_breakout(multi_tf_data, current_price, volume_data):
         # Price momentum confirmation
         price_momentum = (current_price - closes[-5]) / closes[-5] > 0.02  # 2% move
         
-        if volume_surge and price_momentum:
-            return True, f"Breakout above {resistance:.4f} with volume"
-        elif volume_surge:
-            return True, f"Breakout above {resistance:.4f} (volume confirmed)"
-        elif price_momentum:
-            return True, f"Breakout above {resistance:.4f} (momentum confirmed)"
+        # RSI divergence confirmation (ADDED)
+        has_divergence, div_reason = detect_rsi_divergence(multi_tf_data, current_price)
+        
+        confirmations = []
+        if volume_surge:
+            confirmations.append("volume")
+        if price_momentum:
+            confirmations.append("momentum")
+        if has_divergence:
+            confirmations.append(div_reason)
+        
+        if len(confirmations) >= 2:  # Need at least 2 confirmations
+            return True, f"Breakout above {resistance:.4f} ({', '.join(confirmations)})"
+        elif len(confirmations) == 1:
+            return True, f"Weak breakout above {resistance:.4f} ({confirmations[0]})"
         else:
-            return False, "Weak breakout signal"
+            return False, "Breakout lacks confirmation"
             
     except Exception as e:
         print(f"Breakout detection error: {e}")
         return False, "Error"
 
-def identify_high_volume_coins(market_data, min_volume_usdt=20_000_000):
-    """Identify coins with high trading volume"""
+def identify_high_volume_coins(market_data, min_volume_usdt=10_000_000):
+    """Identify coins with high trading volume - now includes all filtered coins"""
     high_volume_coins = []
     for coin, data in market_data.items():
-        if data["quote_volume"] > min_volume_usdt:
-            volume_score = data["quote_volume"] / 100_000_000  # Normalize to 100M
+        if data["quote_volume"] >= min_volume_usdt:
+            volume_score = data["quote_volume"] / 50_000_000  # Normalize to 50M (mid-cap sweet spot)
             high_volume_coins.append((coin, volume_score, data))
     
     # Sort by volume score
     high_volume_coins.sort(key=lambda x: x[1], reverse=True)
-    return high_volume_coins[:15]  # Top 15 by volume
+    return high_volume_coins[:20]  # Top 20 by volume
 
 def detect_supply_demand_zones(multi_tf_data):
     """Detect supply and demand zones"""
@@ -601,16 +736,25 @@ def check_grid_triggers(symbol, current_price):
 
 # ============== Trading Decision Engine ==============
 def get_trade_decision(coin, market_data, multi_tf_data):
-    """Main trading decision logic"""
+    """ENHANCED: Main trading decision logic with order book analysis"""
     try:
         current_price = market_data[coin]["price"]
+        symbol = f"{coin}USDT"
         
         # 1. Detect market regime
         regime = detect_market_regime(multi_tf_data, current_price)
         
-        # 2. High volume filter
-        if market_data[coin]["quote_volume"] < 10_000_000:  # Minimum 30M USDT volume
+        # 2. High volume filter (now more lenient due to mid-cap focus)
+        if market_data[coin]["quote_volume"] < 10_000_000:  # Minimum 10M USDT volume
             return {"direction": "SKIP", "reason": "Low volume"}
+        
+        # ENHANCEMENT 1: Order book liquidity check - critical for mid-caps
+        ob_data = get_order_book_analysis(symbol)
+        if ob_data["spread"] > 0.1 or ob_data["liquidity_score"] < 40:
+            return {
+                "direction": "SKIP", 
+                "reason": f"Illiquid: spread={ob_data['spread']:.2f}%, liq_score={ob_data['liquidity_score']:.1f}"
+            }
         
         # 3. Supply/Demand analysis
         sd_zones = detect_supply_demand_zones(multi_tf_data)
@@ -627,11 +771,13 @@ def get_trade_decision(coin, market_data, multi_tf_data):
             if is_breakout:
                 direction = "LONG" if regime == "trending_up" else "SHORT"
                 
-                # Calculate stops based on ATR
+                # Calculate stops based on ATR with price awareness
                 atr = calculate_atr(
                     multi_tf_data["1h"]["highs"], 
                     multi_tf_data["1h"]["lows"], 
-                    multi_tf_data["1h"]["closes"]
+                    multi_tf_data["1h"]["closes"],
+                    14,
+                    current_price  # Pass current price for capping
                 )
                 
                 if direction == "LONG":
@@ -647,7 +793,8 @@ def get_trade_decision(coin, market_data, multi_tf_data):
                     "stop_loss": stop_loss,
                     "take_profit": take_profit,
                     "regime": regime,
-                    "strategy": "breakout"
+                    "strategy": "breakout",
+                    "liquidity": f"Spread: {ob_data['spread']:.3f}%, Liquidity: {ob_data['liquidity_score']:.1f}"
                 }
                 
         elif regime == "volatile":
@@ -661,11 +808,13 @@ def get_trade_decision(coin, market_data, multi_tf_data):
             if abs(combined_signal) > 0.6:  # Strong signal threshold
                 direction = "LONG" if combined_signal > 0 else "SHORT"
                 
-                # Calculate stops
+                # Calculate stops with price awareness
                 atr = calculate_atr(
                     multi_tf_data["1h"]["highs"], 
                     multi_tf_data["1h"]["lows"], 
-                    multi_tf_data["1h"]["closes"]
+                    multi_tf_data["1h"]["closes"],
+                    14,
+                    current_price  # Pass current price for capping
                 )
                 
                 if direction == "LONG":
@@ -682,7 +831,8 @@ def get_trade_decision(coin, market_data, multi_tf_data):
                     "take_profit": take_profit,
                     "regime": regime,
                     "strategy": "hybrid",
-                    "signal_strength": abs(combined_signal)
+                    "signal_strength": abs(combined_signal),
+                    "liquidity": f"Spread: {ob_data['spread']:.3f}%, Liquidity: {ob_data['liquidity_score']:.1f}"
                 }
         
         return {"direction": "SKIP", "reason": f"No signal in {regime} market"}
@@ -703,14 +853,22 @@ def place_futures_order(symbol, side, quantity, leverage=LEVERAGE, order_type="M
         print(f"Place order error: {e}")
         return None
 
-def close_futures_position(symbol):
+def close_futures_position(symbol, partial_qty=None):
+    """Close position - can now handle partial closes"""
     try:
         positions = get_open_positions()
         if symbol not in positions: 
             print(f"No open position for {symbol}")
             return None
         pos = positions[symbol]
-        size = abs(pos["size"])
+        
+        if partial_qty is not None:
+            # Partial close
+            size = q_qty(symbol, partial_qty)
+        else:
+            # Full close
+            size = abs(pos["size"])
+            
         side = "SELL" if pos["direction"]=="LONG" else "BUY"
         cid = f"tech-close-{int(time.time()*1000)}"
         res = binance_request("/fapi/v1/order","POST",signed=True,params={
@@ -746,31 +904,70 @@ def set_stop_loss_take_profit(symbol, stop_price, take_profit_price, position_si
         print(f"SL/TP error: {e}")
         return None
 
+def cancel_all_orders(symbol):
+    """Cancel all open orders for a symbol"""
+    try:
+        res = binance_request("/fapi/v1/allOpenOrders","DELETE",params={"symbol":symbol},signed=True)
+        return res
+    except Exception as e:
+        print(f"Cancel orders error: {e}")
+        return None
+
+def move_stop_to_entry(symbol, entry_price):
+    """Move stop loss to entry price (breakeven)"""
+    try:
+        positions = get_open_positions()
+        if symbol not in positions:
+            return None
+            
+        pos = positions[symbol]
+        
+        # Cancel existing SL/TP orders
+        cancel_all_orders(symbol)
+        
+        # Set new SL at entry
+        qty = abs(pos["size"])
+        qty = q_qty(symbol, qty)
+        sl_side = "SELL" if pos["direction"] == "LONG" else "BUY"
+        
+        sl_order = binance_request("/fapi/v1/order","POST",signed=True,params={
+            "symbol": symbol, "side": sl_side, "type": "STOP_MARKET", "quantity": qty,
+            "stopPrice": q_price(symbol, entry_price), "workingType": "MARK_PRICE", "reduceOnly": True
+        })
+        
+        return sl_order
+        
+    except Exception as e:
+        print(f"Move SL error: {e}")
+        return None
+
 def execute_trade(coin, trade_params, current_price, balance):
-    """Execute trade with live logging"""
+    """Execute trade with live logging - FIXED POSITION SIZING"""
     if trade_params["direction"] in ["SKIP", "GRID"]:
         return False
         
     try:
         symbol = f"{coin}USDT"
         
-        # Fixed position sizing: 15% of portfolio at 15x leverage
-        position_value = balance * POSITION_SIZE
-        notional = position_value * LEVERAGE
-        qty = q_qty(symbol, position_value / current_price)
+        # FIXED: Position sizing with correct leverage application
+        position_value = balance * POSITION_SIZE  # 15% of balance as margin
+        notional = position_value * LEVERAGE      # Full exposure (15% * 15x = 225% of balance)
+        qty = q_qty(symbol, notional / current_price)  # FIXED: Use notional, not position_value
         
         if qty <= 0:
             add_bot_log("ERROR", "TRADE", f"{coin}: Quantity rounded to zero")
             return False
 
-        # Minimum notional check
+        # Minimum notional check - FIXED: Use notional instead of position_value * current_price
         min_notional = _symbol_info.get(symbol, {}).get("minNotional", Decimal("5"))
-        computed_notional = Decimal(str(current_price)) * Decimal(str(qty))
+        computed_notional = Decimal(str(notional))  # FIXED: Use actual notional
         if computed_notional < min_notional:
             add_bot_log("ERROR", "TRADE", f"{coin}: Below MIN_NOTIONAL: {float(computed_notional):.2f} < {float(min_notional):.2f}")
             return False
 
-        add_bot_log("INFO", "EXECUTE", f"{coin} {trade_params['direction']} - Size: ${position_value:.0f} ({POSITION_SIZE*100}%) - Strategy: {trade_params.get('strategy', 'unknown')}")
+        # Log liquidity info if available
+        liquidity_info = trade_params.get("liquidity", "")
+        add_bot_log("INFO", "EXECUTE", f"{coin} {trade_params['direction']} - Margin: ${position_value:.0f} | Exposure: ${notional:.0f} ({LEVERAGE}x) - Strategy: {trade_params.get('strategy', 'unknown')} | {liquidity_info}")
 
         # Execute the trade
         side = "BUY" if trade_params["direction"] == "LONG" else "SELL"
@@ -821,7 +1018,7 @@ def execute_trade(coin, trade_params, current_price, balance):
               trade_params.get("stop_loss", 0), trade_params.get("take_profit", 0),
               trade_params["reason"], trade_params.get("regime", "unknown")))
 
-        add_bot_log("SUCCESS", "TRADE", f"{coin} {trade_params['direction']} executed - Entry: ${current_price:.4f}")
+        add_bot_log("SUCCESS", "TRADE", f"{coin} {trade_params['direction']} executed - Entry: ${current_price:.4f} | Exposure: ${notional:.0f}")
         return True
 
     except Exception as e:
@@ -829,9 +1026,26 @@ def execute_trade(coin, trade_params, current_price, balance):
         return False
 
 def handle_grid_trading(coin, symbol, current_price, balance):
-    """Handle grid trading execution"""
+    """ENHANCED: Handle grid trading execution with improved level handling and grid reset"""
     try:
-        # Check if grid already exists
+        # ENHANCEMENT 2: Check if grid needs reset (price out of range)
+        levels = db_execute("""
+            SELECT MIN(level_price), MAX(level_price) FROM grid_positions 
+            WHERE symbol = ? AND filled = FALSE
+        """, (symbol,), fetch=True)
+        
+        if levels and levels[0] and levels[0][0] is not None and levels[0][1] is not None:
+            min_price, max_price = levels[0]
+            # If price is more than 10% outside grid range, reset grid
+            if current_price < min_price * 0.9 or current_price > max_price * 1.1:
+                db_execute("DELETE FROM grid_positions WHERE symbol = ? AND filled = FALSE", (symbol,))
+                add_bot_log("INFO", "GRID", f"{coin}: Reset grid - price out of range (${current_price:.4f} vs ${min_price:.4f}-${max_price:.4f})")
+                # Create new grid
+                grid_id = setup_grid_trading(coin, symbol, current_price, balance)
+                if not grid_id:
+                    return False
+        
+        # Check if grid exists, create if not
         existing_grid = db_execute("""
             SELECT COUNT(*) FROM grid_positions WHERE symbol = ? AND filled = FALSE
         """, (symbol,), fetch=True)
@@ -842,11 +1056,13 @@ def handle_grid_trading(coin, symbol, current_price, balance):
             if not grid_id:
                 return False
         
-        # Check for triggered levels
+        # ENHANCEMENT 2: Check for triggered levels - now allow up to 2 levels per check
         triggered_levels = check_grid_triggers(symbol, current_price)
         
         if triggered_levels:
-            for level_id, level_price, level_type, grid_id in triggered_levels[:1]:  # Execute one at a time
+            # Execute up to 2 levels instead of just 1
+            executed_count = 0
+            for level_id, level_price, level_type, grid_id in triggered_levels[:2]:
                 # Calculate position size for grid (smaller than normal trades)
                 grid_position_value = balance * 0.05  # 5% per grid level
                 notional = grid_position_value * LEVERAGE
@@ -863,18 +1079,21 @@ def handle_grid_trading(coin, symbol, current_price, balance):
                             WHERE id = ?
                         """, (res.get("orderId", ""), level_id))
                         
-                        print(f"Grid {level_type} executed for {coin} at ${level_price:.4f}")
-                        return True
+                        add_bot_log("SUCCESS", "GRID", f"Grid {level_type} executed for {coin} at ${level_price:.4f}")
+                        executed_count += 1
+                        time.sleep(1)  # Brief delay between executions
+            
+            return executed_count > 0
         
         return False
         
     except Exception as e:
-        print(f"Grid trading error: {e}")
+        add_bot_log("ERROR", "GRID", f"Grid trading error: {e}")
         return False
 
 # ============== Position Monitoring ==============
 def monitor_positions():
-    """Monitor positions for regime changes and profit taking - with live logging"""
+    """Monitor positions for regime changes and profit taking - ENHANCED with partial closes"""
     try:
         positions = get_open_positions()
         
@@ -892,6 +1111,8 @@ def monitor_positions():
             
             # Check for regime change exit
             should_close = False
+            should_partial_close = False
+            should_move_sl = False
             close_reason = ""
             
             # Get position details from database
@@ -902,29 +1123,65 @@ def monitor_positions():
             if pos_details:
                 strategy = pos_details[0][0]
                 
+                # ENHANCED: Profit management
+                if pnl_pct >= 100:  # 100% profit - close completely
+                    should_close = True
+                    close_reason = f"100% profit target reached ({pnl_pct:.1f}%)"
+                elif pnl_pct >= 50:  # 50% profit - close half and move SL to entry
+                    should_partial_close = True
+                    should_move_sl = True
+                    close_reason = f"Partial close at 50% profit ({pnl_pct:.1f}%)"
+                elif pnl_pct > 8:  # Old profit taking logic (reduced threshold)
+                    should_close = True
+                    close_reason = f"Profit taking at {pnl_pct:.1f}%"
+                elif pnl_pct < -20:  # CHANGED: Emergency stop from -4% to -20%
+                    should_close = True
+                    close_reason = f"Emergency stop at {pnl_pct:.1f}%"
+                
                 # Exit conditions based on strategy
-                if strategy == "breakout":
+                if strategy == "breakout" and not should_close and not should_partial_close:
                     if current_regime in ["ranging", "volatile"]:
                         should_close = True
                         close_reason = f"Regime changed to {current_regime}"
                         
-                elif strategy == "hybrid":
+                elif strategy == "hybrid" and not should_close and not should_partial_close:
                     momentum_signal, _ = calculate_momentum_signal(multi_tf_data)
                     position_direction = 1 if pos["direction"] == "LONG" else -1
                     
                     if momentum_signal * position_direction < -0.3:
                         should_close = True
                         close_reason = "Momentum reversal detected"
-                
-                # Profit taking for all strategies
-                if pnl_pct > 8:
-                    should_close = True
-                    close_reason = f"Profit taking at {pnl_pct:.1f}%"
-                elif pnl_pct < -4:
-                    should_close = True
-                    close_reason = f"Emergency stop at {pnl_pct:.1f}%"
             
-            if should_close:
+            # Execute actions
+            if should_partial_close:
+                # Close half position
+                half_size = abs(pos["size"]) / 2
+                add_bot_log("WARNING", "PARTIAL", f"Partial close {pos['coin']}: {close_reason}")
+                res = close_futures_position(symbol, half_size)
+                
+                if res and should_move_sl:
+                    # Move SL to entry
+                    move_res = move_stop_to_entry(symbol, pos["entry_price"])
+                    if move_res:
+                        add_bot_log("INFO", "BREAKEVEN", f"{pos['coin']}: Stop moved to breakeven")
+                    
+                    # Record the partial closure
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    pnl_usd = pos["pnl"] / 2  # Rough estimate for half position
+                    pnl_percent = pnl_pct
+                    
+                    db_execute("""
+                        INSERT INTO trades (timestamp, position_id, coin, action, direction, price,
+                                          pnl, pnl_percent, reason, profitable)
+                        VALUES (?,?,?,?,?,?,?,?,?,?)
+                    """, (ts, f"{symbol}_PARTIAL_{ts.replace(' ','_').replace(':','-')}",
+                          pos["coin"], f"{pos['direction']} PARTIAL", pos["direction"], 
+                          pos["mark_price"], pnl_usd, pnl_percent, close_reason, 
+                          1 if pnl_usd > 0 else 0))
+                    
+                    add_bot_log("SUCCESS", "PARTIAL", f"Partial close {pos['coin']}: P&L ${pnl_usd:+.2f} ({pnl_percent:+.1f}%)")
+                    
+            elif should_close:
                 add_bot_log("WARNING", "EXIT", f"Closing {pos['coin']}: {close_reason}")
                 res = close_futures_position(symbol)
                 
@@ -1057,6 +1314,8 @@ def run_technical_bot():
 
     add_bot_log("INFO", "STARTUP", "Technical Analysis Trading Bot starting...")
     add_bot_log("INFO", "CONFIG", f"Position Size: {POSITION_SIZE*100}% | Leverage: {LEVERAGE}x | Max Positions: {MAX_CONCURRENT_POSITIONS}")
+    add_bot_log("INFO", "TARGETS", f"Tracking {len(_all_usdt_symbols)} USDT perpetuals | Favorites: {len(FAVORITE_COINS)} coins")
+    add_bot_log("INFO", "ENHANCEMENTS", "✓ Order book analysis ✓ Grid improvements ✓ ATR capping ✓ Decimal precision ✓ API caching")
     
     balance = get_futures_balance()
     if balance <= 0:
@@ -1088,26 +1347,31 @@ def run_technical_bot():
                 
                 # Identify high volume candidates
                 high_volume_coins = identify_high_volume_coins(md)
-                add_bot_log("INFO", "ANALYSIS", f"Found {len(high_volume_coins)} high volume candidates")
+                add_bot_log("INFO", "ANALYSIS", f"Found {len(high_volume_coins)} mid-cap candidates | Universe: {len(md)} coins | Cache: {len(_tf_cache)} entries")
                 
                 # Check if we can open new positions
                 if stats['positions_count'] < MAX_CONCURRENT_POSITIONS:
                     max_new = MAX_CONCURRENT_POSITIONS - stats['positions_count']
                     executed = 0
+                    skipped_liquidity = 0
                     
-                    for coin, volume_score, coin_data in high_volume_coins[:15]:
+                    for coin, volume_score, coin_data in high_volume_coins[:20]:
                         if executed >= max_new:
                             break
-                            
+        
                         symbol = f"{coin}USDT"
                         if symbol in positions:
                             continue
-                            
-                        # Get technical analysis
-                        add_bot_log("INFO", "ANALYSIS", f"Analyzing {coin} - Price: ${coin_data['price']:.4f} | Volume: {coin_data['quote_volume']/1000000:.1f}M")
-                        
+        
+                        # Get technical analysis - THIS IS MISSING!
+                        add_bot_log("INFO", "ANALYSIS", f"Analyzing {coin} - Price: ${coin_data['price']:.4f} | Volume: {coin_data['quote_volume']/1000000:.1f}M | Mid-cap: {'✓' if coin_data['quote_volume'] <= 100_000_000 else '✗'}")
+    
                         multi_tf_data = get_multi_timeframe_data(symbol)
                         trade_decision = get_trade_decision(coin, md, multi_tf_data)
+                        if trade_decision["direction"] == "SKIP" and "Illiquid" in trade_decision["reason"]:
+                            skipped_liquidity += 1
+                            add_bot_log("DEBUG", "LIQUIDITY", f"{coin}: {trade_decision['reason']}")
+                            continue
                         
                         if trade_decision["direction"] == "GRID":
                             add_bot_log("INFO", "STRATEGY", f"{coin}: {trade_decision['reason']}")
@@ -1125,7 +1389,8 @@ def run_technical_bot():
                             add_bot_log("DEBUG", "SKIP", f"{coin}: {trade_decision['reason']}")
                     
                     if executed == 0:
-                        add_bot_log("INFO", "SCAN", "No trading opportunities found in this scan")
+                        reason_msg = f" ({skipped_liquidity} illiquid)" if skipped_liquidity > 0 else ""
+                        add_bot_log("INFO", "SCAN", f"No trading opportunities found in this scan{reason_msg}")
                     else:
                         add_bot_log("SUCCESS", "SCAN", f"Executed {executed} new position(s)")
                         
