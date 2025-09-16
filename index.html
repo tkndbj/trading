@@ -549,7 +549,7 @@
           </div>
           <div class="metric-line">
             <span>Min Volume:</span>
-            <span class="neutral">30M USDT</span>
+            <span class="neutral">10M USDT</span>
           </div>
         </div>
 
@@ -692,7 +692,7 @@
           </div>
           <div class="metric-line">
             <span>Min Volume:</span>
-            <span class="neutral">30M USDT</span>
+            <span class="neutral">10M USDT</span>
           </div>
         </div>
 
@@ -1029,7 +1029,7 @@
         }
 
         const sortedCoins = Object.entries(marketData)
-          .filter(([, data]) => (data.quote_volume || 0) > 30_000_000)
+          .filter(([, data]) => (data.quote_volume || 0) > 10_000_000)
           .sort(([, a], [, b]) => (b.quote_volume || 0) - (a.quote_volume || 0))
           .slice(0, 10);
 

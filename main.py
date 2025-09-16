@@ -243,7 +243,7 @@ def get_open_positions():
 def get_batch_market_data():
     try:
         data = binance_request("/fapi/v1/ticker/24hr", "GET", signed=False) or []
-        target = {'BTC','ETH','SOL','BNB','SEI','DOGE','TIA','TAO','ARB','SUI','ENA','FET','APT','ZK','OP','LDO','WLD','XRP','LINK','AVAX','MATIC','ADA','DOT','UNI','ATOM','NEAR','ICP','FIL','LTC','BCH','ETC','HBAR','VET','ALGO','THETA'}
+        target = {'BOME','PENDLE','JUP','LINEA','UB','ZEC','CGPT','POPCAT','WIF','OL','JASMY','BLUR','GMX','COMP'}
         md = {}
         for t in data:
             sym = t["symbol"]
@@ -431,7 +431,7 @@ def detect_breakout(multi_tf_data, current_price, volume_data):
         print(f"Breakout detection error: {e}")
         return False, "Error"
 
-def identify_high_volume_coins(market_data, min_volume_usdt=50_000_000):
+def identify_high_volume_coins(market_data, min_volume_usdt=20_000_000):
     """Identify coins with high trading volume"""
     high_volume_coins = []
     for coin, data in market_data.items():
@@ -609,7 +609,7 @@ def get_trade_decision(coin, market_data, multi_tf_data):
         regime = detect_market_regime(multi_tf_data, current_price)
         
         # 2. High volume filter
-        if market_data[coin]["quote_volume"] < 30_000_000:  # Minimum 30M USDT volume
+        if market_data[coin]["quote_volume"] < 10_000_000:  # Minimum 30M USDT volume
             return {"direction": "SKIP", "reason": "Low volume"}
         
         # 3. Supply/Demand analysis
@@ -757,7 +757,7 @@ def execute_trade(coin, trade_params, current_price, balance):
         # Fixed position sizing: 15% of portfolio at 15x leverage
         position_value = balance * POSITION_SIZE
         notional = position_value * LEVERAGE
-        qty = q_qty(symbol, notional / current_price)
+        qty = q_qty(symbol, position_value / current_price)
         
         if qty <= 0:
             add_bot_log("ERROR", "TRADE", f"{coin}: Quantity rounded to zero")
