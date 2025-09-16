@@ -104,7 +104,7 @@ MAX_CONCURRENT_POSITIONS = 8
 CHECK_INTERVAL = 30  # 30 seconds
 
 # Favorite coins - can be manually curated for "right room" strategy
-FAVORITE_COINS = {'BOME','PENDLE','JUP','LINEA','UB','ZEC','CGPT','POPCAT','WIF','OL','JASMY','BLUR','GMX','COMP','ARB','OP','AVAX','MATIC','DOT','ADA','LINK','UNI','AAVE','CRV','SNX','1INCH','SUSHI','YFI','BAL','MKR'}
+FAVORITE_COINS = {'BOME','PENDLE','JUP','LINEA','UB','ZEC','CGPT','POPCAT','WIF','OL','JASMY','BLUR','GMX','COMP','CRV','SNX','1INCH','SUSHI','YFI','BAL','MKR'}
 
 # ENHANCEMENT: Multi-timeframe data cache
 _tf_cache = {}
