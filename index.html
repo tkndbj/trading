@@ -740,7 +740,7 @@
       function startDataFetching() {
         fetchData();
         if (updateInterval) clearInterval(updateInterval);
-        updateInterval = setInterval(fetchData, 15000); // 15 seconds
+        updateInterval = setInterval(fetchData, 120000); // 2 minutes
       }
 
       async function fetchData() {
