@@ -177,6 +177,7 @@ def init_database():
         take_profit REAL NOT NULL,
         strategy_type TEXT,
         grid_levels TEXT,
+        partial_closed BOOLEAN DEFAULT FALSE,
         last_checked DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS grid_positions (
@@ -1135,7 +1136,6 @@ def handle_grid_trading(coin, symbol, current_price, balance):
 
 # ============== Position Monitoring ==============
 def monitor_positions():
-    """Monitor positions for regime changes and profit taking - ENHANCED with partial closes"""
     try:
         positions = get_open_positions()
         
@@ -1147,7 +1147,7 @@ def monitor_positions():
             multi_tf_data = get_multi_timeframe_data(symbol)
             current_regime = detect_market_regime(multi_tf_data, pos["mark_price"])
             
-            # FIX: Correct pnl_pct calculation using initial notional
+            # Calculate P&L
             initial_notional = abs(pos["size"]) * pos["entry_price"]
             initial_margin = initial_notional / pos["leverage"] if pos["leverage"] > 0 else 0
             pnl_pct = (pos["pnl"] / initial_margin * 100) if initial_margin > 0 else 0
@@ -1161,22 +1161,9 @@ def monitor_positions():
             should_move_sl = False
             close_reason = ""
             
-            # FIX: Moved P&L checks outside if pos_details - now applies to ALL positions (incl. grids)
-            # FIX: Removed pnl_pct > 8 close to match user-spec (only 50%/100%)
-            if pnl_pct >= 100:  # 100% profit - close completely
-                should_close = True
-                close_reason = f"100% profit target reached ({pnl_pct:.1f}%)"
-            elif pnl_pct >= 50:  # 50% profit - close half and move SL to entry
-                should_partial_close = True
-                should_move_sl = True
-                close_reason = f"Partial close at 50% profit ({pnl_pct:.1f}%)"
-            elif pnl_pct < -20:  # Emergency stop at -20%
-                should_close = True
-                close_reason = f"Emergency stop at {pnl_pct:.1f}%"
-            
-            # Get position details from database (for strategy-specific exits)
+            # Get position details from database
             pos_details = db_execute("""
-                SELECT strategy_type FROM active_positions WHERE symbol = ?
+                SELECT strategy_type, partial_closed FROM active_positions WHERE symbol = ?
             """, (symbol,), fetch=True)
 
             if not pos_details:
@@ -1189,29 +1176,41 @@ def monitor_positions():
                     INSERT OR REPLACE INTO active_positions (
                         position_id, coin, symbol, direction, entry_price, entry_time,
                         position_size, leverage, notional_value, stop_loss, take_profit,
-                        strategy_type
+                        strategy_type, partial_closed
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     pid, pos["coin"], symbol, pos["direction"], pos["entry_price"], ts,
-                    margin, pos["leverage"], initial_notional, 0, 0, "unknown"
+                    margin, pos["leverage"], initial_notional, 0, 0, "unknown", False
                 ))
                 strategy = "unknown"
+                partial_closed = False
             else:
                 strategy = pos_details[0][0]
-                
-                # Exit conditions based on strategy
-                if strategy == "breakout" and not should_close and not should_partial_close:
-                    if current_regime in ["ranging", "volatile"]:
-                        should_close = True
-                        close_reason = f"Regime changed to {current_regime}"
-                        
-                elif strategy == "hybrid" and not should_close and not should_partial_close:
-                    momentum_signal, _ = calculate_momentum_signal(multi_tf_data)
-                    position_direction = 1 if pos["direction"] == "LONG" else -1
-                    
-                    if momentum_signal * position_direction < -0.3:
-                        should_close = True
-                        close_reason = "Momentum reversal detected"
+                partial_closed = bool(pos_details[0][1])  # Convert to boolean
+            
+            # P&L-based exits
+            if pnl_pct >= 100:  # Full close
+                should_close = True
+                close_reason = f"100% profit target reached ({pnl_pct:.1f}%)"
+            elif pnl_pct >= 50 and not partial_closed:  # Partial close only if not already done
+                should_partial_close = True
+                should_move_sl = True
+                close_reason = f"Partial close at 50% profit ({pnl_pct:.1f}%)"
+            elif pnl_pct < -20:  # Emergency stop
+                should_close = True
+                close_reason = f"Emergency stop at {pnl_pct:.1f}%"
+            
+            # Strategy-specific exits
+            if strategy == "breakout" and not should_close and not should_partial_close:
+                if current_regime in ["ranging", "volatile"]:
+                    should_close = True
+                    close_reason = f"Regime changed to {current_regime}"
+            elif strategy == "hybrid" and not should_close and not should_partial_close:
+                momentum_signal, _ = calculate_momentum_signal(multi_tf_data)
+                position_direction = 1 if pos["direction"] == "LONG" else -1
+                if momentum_signal * position_direction < -0.3:
+                    should_close = True
+                    close_reason = "Momentum reversal detected"
             
             # Execute actions
             if should_partial_close:
@@ -1220,11 +1219,15 @@ def monitor_positions():
                 add_bot_log("WARNING", "PARTIAL", f"Partial close {pos['coin']}: {close_reason}")
                 res = close_futures_position(symbol, half_size)
                 
-                if res and should_move_sl:
-                    # Move SL to entry
-                    move_res = move_stop_to_entry(symbol, pos["entry_price"])
-                    if move_res:
-                        add_bot_log("INFO", "BREAKEVEN", f"{pos['coin']}: Stop moved to breakeven")
+                if res:
+                    # Update partial_closed flag
+                    db_execute("UPDATE active_positions SET partial_closed = ? WHERE symbol = ?", (True, symbol))
+                    
+                    if should_move_sl:
+                        # Move SL to entry
+                        move_res = move_stop_to_entry(symbol, pos["entry_price"])
+                        if move_res:
+                            add_bot_log("INFO", "BREAKEVEN", f"{pos['coin']}: Stop moved to breakeven")
                     
                     # Record the partial closure
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
