@@ -899,9 +899,15 @@ def set_stop_loss_take_profit(symbol, stop_price, take_profit_price, position_si
             "symbol": symbol, "side": tp_side, "type": "TAKE_PROFIT_MARKET", "quantity": qty,
             "stopPrice": q_price(symbol, take_profit_price), "workingType": "MARK_PRICE", "reduceOnly": True
         })
+        # FIX: Added logging for TP/SL setup
+        if sl_order and tp_order:
+            add_bot_log("INFO", "SLTP", f"{symbol}: SL/TP set successfully (SL: {stop_price:.4f}, TP: {take_profit_price:.4f})")
+        else:
+            add_bot_log("ERROR", "SLTP", f"{symbol}: Failed to set SL/TP")
         return {"stop_loss": sl_order, "take_profit": tp_order}
     except Exception as e:
         print(f"SL/TP error: {e}")
+        add_bot_log("ERROR", "SLTP", f"{symbol}: SL/TP setup error - {e}")
         return None
 
 def cancel_all_orders(symbol):
@@ -1081,6 +1087,42 @@ def handle_grid_trading(coin, symbol, current_price, balance):
                         
                         add_bot_log("SUCCESS", "GRID", f"Grid {level_type} executed for {coin} at ${level_price:.4f}")
                         executed_count += 1
+                        # FIX: Record grid trade in database for monitoring (like regular trades)
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        direction = "LONG" if level_type == "BUY" else "SHORT"
+                        pid = f"{symbol}_GRID_{ts.replace(' ','_').replace(':','-')}"
+                        db_execute("""
+                            INSERT OR REPLACE INTO active_positions (
+                                position_id, coin, symbol, direction, entry_price, entry_time,
+                                position_size, leverage, notional_value, stop_loss, take_profit,
+                                strategy_type
+                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                        """, (
+                            pid, coin, symbol, direction, current_price, ts,
+                            grid_position_value, LEVERAGE, float(notional), 
+                            0, 0, "grid"  # No initial SL/TP, but monitoring will handle
+                        ))
+
+                        db_execute("""
+                            INSERT INTO trades (timestamp,position_id,coin,action,direction,price,position_size,leverage,
+                            notional_value,stop_loss,take_profit,reason,market_conditions)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """, (ts, pid, coin, f"{direction} OPEN (GRID)", direction, 
+                              current_price, grid_position_value, LEVERAGE, float(notional), 
+                              0, 0, "Grid level triggered", "ranging"))
+                        
+                        # FIX: Optional - Set wide SL/TP for grid positions (equivalent to -20%/100% P&L)
+                        entry = current_price
+                        if direction == "LONG":
+                            stop_loss = entry * (1 - 0.2 / LEVERAGE)
+                            take_profit = entry * (1 + 1.0 / LEVERAGE)  # 100% P&L
+                        else:
+                            stop_loss = entry * (1 + 0.2 / LEVERAGE)
+                            take_profit = entry * (1 - 1.0 / LEVERAGE)
+                        sltp = set_stop_loss_take_profit(symbol, stop_loss, take_profit, direction)
+                        if sltp:
+                            db_execute("UPDATE active_positions SET stop_loss = ?, take_profit = ? WHERE position_id = ?", (stop_loss, take_profit, pid))
+                        
                         time.sleep(1)  # Brief delay between executions
             
             return executed_count > 0
@@ -1105,8 +1147,12 @@ def monitor_positions():
             multi_tf_data = get_multi_timeframe_data(symbol)
             current_regime = detect_market_regime(multi_tf_data, pos["mark_price"])
             
+            # FIX: Correct pnl_pct calculation using initial notional
+            initial_notional = abs(pos["size"]) * pos["entry_price"]
+            initial_margin = initial_notional / pos["leverage"] if pos["leverage"] > 0 else 0
+            pnl_pct = (pos["pnl"] / initial_margin * 100) if initial_margin > 0 else 0
+            
             # Log position status
-            pnl_pct = (pos["pnl"] / (pos["notional"]/pos["leverage"])) * 100 if pos["notional"] > 0 else 0
             add_bot_log("DEBUG", "POSITION", f"{pos['coin']}: {pos['direction']} | P&L: {pnl_pct:+.1f}% | Regime: {current_regime}")
             
             # Check for regime change exit
@@ -1115,28 +1161,43 @@ def monitor_positions():
             should_move_sl = False
             close_reason = ""
             
-            # Get position details from database
+            # FIX: Moved P&L checks outside if pos_details - now applies to ALL positions (incl. grids)
+            # FIX: Removed pnl_pct > 8 close to match user-spec (only 50%/100%)
+            if pnl_pct >= 100:  # 100% profit - close completely
+                should_close = True
+                close_reason = f"100% profit target reached ({pnl_pct:.1f}%)"
+            elif pnl_pct >= 50:  # 50% profit - close half and move SL to entry
+                should_partial_close = True
+                should_move_sl = True
+                close_reason = f"Partial close at 50% profit ({pnl_pct:.1f}%)"
+            elif pnl_pct < -20:  # Emergency stop at -20%
+                should_close = True
+                close_reason = f"Emergency stop at {pnl_pct:.1f}%"
+            
+            # Get position details from database (for strategy-specific exits)
             pos_details = db_execute("""
                 SELECT strategy_type FROM active_positions WHERE symbol = ?
             """, (symbol,), fetch=True)
-            
-            if pos_details:
+
+            if not pos_details:
+                add_bot_log("WARNING", "MONITOR", f"{pos['coin']}: No position data in database, syncing...")
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                pid = f"{symbol}_SYNC_{ts.replace(' ','_').replace(':','-')}"
+                initial_notional = abs(pos["size"]) * pos["entry_price"]
+                margin = initial_notional / pos["leverage"] if pos["leverage"] > 0 else 0
+                db_execute("""
+                    INSERT OR REPLACE INTO active_positions (
+                        position_id, coin, symbol, direction, entry_price, entry_time,
+                        position_size, leverage, notional_value, stop_loss, take_profit,
+                        strategy_type
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    pid, pos["coin"], symbol, pos["direction"], pos["entry_price"], ts,
+                    margin, pos["leverage"], initial_notional, 0, 0, "unknown"
+                ))
+                strategy = "unknown"
+            else:
                 strategy = pos_details[0][0]
-                
-                # ENHANCED: Profit management
-                if pnl_pct >= 100:  # 100% profit - close completely
-                    should_close = True
-                    close_reason = f"100% profit target reached ({pnl_pct:.1f}%)"
-                elif pnl_pct >= 50:  # 50% profit - close half and move SL to entry
-                    should_partial_close = True
-                    should_move_sl = True
-                    close_reason = f"Partial close at 50% profit ({pnl_pct:.1f}%)"
-                elif pnl_pct > 8:  # Old profit taking logic (reduced threshold)
-                    should_close = True
-                    close_reason = f"Profit taking at {pnl_pct:.1f}%"
-                elif pnl_pct < -20:  # CHANGED: Emergency stop from -4% to -20%
-                    should_close = True
-                    close_reason = f"Emergency stop at {pnl_pct:.1f}%"
                 
                 # Exit conditions based on strategy
                 if strategy == "breakout" and not should_close and not should_partial_close:
@@ -1189,7 +1250,7 @@ def monitor_positions():
                     # Record the closure
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     pnl_usd = pos["pnl"]
-                    pnl_percent = (pnl_usd / (pos["notional"]/pos["leverage"])) * 100 if pos["notional"] > 0 else 0
+                    pnl_percent = pnl_pct
                     
                     db_execute("""
                         INSERT INTO trades (timestamp, position_id, coin, action, direction, price,
