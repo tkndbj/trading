@@ -1231,7 +1231,9 @@ def monitor_positions():
                     
                     # Record the partial closure
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    pnl_usd = pos["pnl"] / 2  # Rough estimate for half position
+                    half_size = abs(pos["size"]) / 2
+                    pnl_per_unit = (pos["mark_price"] - pos["entry_price"]) if pos["direction"] == "LONG" else (pos["entry_price"] - pos["mark_price"])
+                    pnl_usd = half_size * pnl_per_unit
                     pnl_percent = pnl_pct
                     
                     db_execute("""
@@ -1315,6 +1317,7 @@ def api_status():
         recent_trades = db_execute("""
             SELECT timestamp, coin, action, direction, price, pnl, pnl_percent, reason
             FROM trades 
+            WHERE action LIKE '%CLOSE%' OR action LIKE '%PARTIAL%'
             ORDER BY created_at DESC, timestamp DESC 
             LIMIT 20
         """, fetch=True)
